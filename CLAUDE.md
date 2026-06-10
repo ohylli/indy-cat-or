@@ -18,6 +18,8 @@ uv run pytest                 # run tests
 uv sync                       # sync venv to the lockfile explicitly
 ```
 
+Lint/format with **ruff** and type-check with **mypy** (`uv run ruff check`, `uv run ruff format`, `uv run mypy`); run them on code you write. Type annotations are expected. Config lives in `pyproject.toml`.
+
 ## File structure
 
 - `src/indycat/` — **the core**: the importable, UI-agnostic detect→crop→embed→decide pipeline. Currently only `__init__.py`; internal module layout to be decided later. The core never imports from `scripts/` or `experiments/`.
