@@ -22,3 +22,7 @@ __pycache__/
 # Indy photos: kept local only, not committed. The CSV metadata is tracked.
 /images/indy/*
 !/images/indy/mapping.csv
+
+# Streamlit app static dir: a local copy of the photos for the review
+# experiment's data grid, synced from images/indy at runtime — reproducible.
+/experiments/static/
