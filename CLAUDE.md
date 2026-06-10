@@ -4,7 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Pre-implementation. The repository currently contains only `project_handoff.md` (the full design brief) and `images/indy/` (35 photos of the subject cat). **There is no code, build system, test suite, or dependency manifest yet.** When you add the first code, also add the tooling (e.g. a dependency manifest and a way to run things) and document the actual commands here, replacing this paragraph.
+Early implementation. The environment is set up (uv, Python 3.12) but the core pipeline is not yet written — `src/indycat/` deliberately holds only `__init__.py`; the module breakdown is intentionally undecided.
+
+## Tooling & commands
+
+Managed with **uv**. The `indycat` package is installed editable, so `import indycat` works from any script without path hacks. `uv run` auto-syncs the venv from `uv.lock` first — there is no manual venv activation.
+
+```powershell
+uv add <pkg>                  # add a runtime dependency (deps start empty; add as needed)
+uv add --dev <pkg>            # add a dev-only tool (e.g. pytest, ruff)
+uv run python scripts/foo.py  # run a script inside the managed venv
+uv run pytest                 # run tests
+uv sync                       # sync venv to the lockfile explicitly
+```
+
+## File structure
+
+- `src/indycat/` — **the core**: the importable, UI-agnostic detect→crop→embed→decide pipeline. Currently only `__init__.py`; internal module layout to be decided later. The core never imports from `scripts/` or `experiments/`.
+- `scripts/` — **keepers**: reusable, maintained entry points that drive the core (build gallery, embed datasets, calibrate, evaluate, UI launchers).
+- `experiments/` — **throwaway**: exploratory one-offs, the "each data addition is a measured experiment" scratch space. Committed (shared dependency set); promote anything worth keeping into `scripts/`.
+- `tests/` — pytest suite.
+- `data/` — datasets and embedding caches; **contents gitignored** (large, reproducible). `data/embeddings/` holds cached vectors.
+- `images/indy/` — the 35 Indy photos (tracked) plus `mapping.csv`.
+- `project_handoff.md` — the authoritative design brief.
 
 `project_handoff.md` is the authoritative design document. Read it before making architectural decisions. Its decisions are described as a "considered starting point, not fixed requirements" — several are explicitly flagged as candidates for revision once real results come in (see its "Things most likely to change" section). Treat them as defaults to justify deviating from, not constraints.
 

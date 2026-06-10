@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# uv / virtualenv
+.venv/
+
+# Data & caches: large, reproducible, not for version control.
+# Keep the folder and its READMEs, ignore everything else inside.
+/data/*
+!/data/README.md
+!/data/embeddings/
+/data/embeddings/*
+!/data/embeddings/README.md
+
+# claude
+.claude/
+
+# Indy photos: kept local only, not committed. The CSV metadata is tracked.
+/images/indy/*
+!/images/indy/mapping.csv

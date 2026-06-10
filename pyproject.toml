@@ -1,0 +1,14 @@
+[project]
+name = "indycat"
+version = "0.1.0"
+description = "Binary verifier: is the specific cat Indy in this image, or not."
+readme = "README.md"
+authors = [
+    { name = "Otto Hylli", email = "otto.hylli@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
