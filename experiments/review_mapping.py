@@ -67,9 +67,14 @@ def static_url(filename: str) -> str | None:
     return None
 
 
-def info_fields(df: pd.DataFrame) -> list[str]:
-    """Label columns to show: everything except hidden and the filename handle."""
-    return [c for c in df.columns if c not in HIDDEN_COLUMNS and c != "new_filename"]
+def info_fields(df: pd.DataFrame, include_filename: bool = False) -> list[str]:
+    """Label columns to show: everything except hidden and optionally the filename
+    handle."""
+    return [
+        c
+        for c in df.columns
+        if c not in HIDDEN_COLUMNS and (include_filename or c != "new_filename")
+    ]
 
 
 def render_rows(df: pd.DataFrame) -> None:
@@ -94,7 +99,7 @@ def render_rows(df: pd.DataFrame) -> None:
 
 def render_grid(df: pd.DataFrame) -> None:
     """Literal data grid with inline thumbnails (known a11y limits)."""
-    fields = info_fields(df)
+    fields = info_fields(df, True)
     filenames = df["new_filename"].tolist()
     sync_static_images(filenames)
     grid = pd.DataFrame(
