@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Early implementation. The environment is set up (uv, Python 3.12) but the core pipeline is not yet written — `src/indycat/` deliberately holds only `__init__.py`; the module breakdown is intentionally undecided.
+Early implementation. The first pipeline stage exists: `src/indycat/detection.py` (detect & crop; `CatDetector` takes an opened PIL image — callers own I/O) with `scripts/detect_indy_gallery.py` driving it over the Indy photos and `tests/test_detection.py` covering it. Measured on the 35 photos, yolo11n missed 8 cats and yolo11m 2, so **yolo11x is the default detector**. torch is installed with CUDA from the pytorch-cu128 index (PyPI's Windows wheel is CPU-only — keep the `tool.uv` index pinning); GPU verified working. Embed and decide stages are not yet written; their module layout is still open.
 
 ## Tooling & commands
 

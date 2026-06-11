@@ -8,6 +8,9 @@ __pycache__/
 # uv / virtualenv
 .venv/
 
+# Detector weights, auto-downloaded by ultralytics into the working directory.
+*.pt
+
 # Data & caches: large, reproducible, not for version control.
 # Keep the folder and its READMEs, ignore everything else inside.
 /data/*
