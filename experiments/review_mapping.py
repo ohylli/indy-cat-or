@@ -46,18 +46,26 @@ HIDDEN_COLUMNS = ("number", "original_filename")
 
 
 @st.cache_data
-def load_mapping() -> pd.DataFrame:
-    """Load the mapping CSV as strings (no type coercion of the label fields)."""
+def load_mapping() -> pd.DataFrame | None:
+    """Load the mapping CSV as strings (no type coercion of the label fields).
+
+    Returns ``None`` if the file is absent, so callers can report it rather than
+    crash with a ``FileNotFoundError``.
+    """
+    if not MAPPING_CSV.exists():
+        return None
     return pd.read_csv(MAPPING_CSV, dtype=str)
 
 
 @st.cache_data
-def load_detections() -> pd.DataFrame:
-    """Load the detect-and-crop results CSV as strings.
+def load_detections() -> pd.DataFrame | None:
+    """Load the detect-and-crop results CSV as strings, or ``None`` if absent.
 
     ``keep_default_na=False`` renders blank cells (no-detection rows, where the
     crop/confidence fields are empty) as empty strings rather than ``NaN``.
     """
+    if not DETECTIONS_CSV.exists():
+        return None
     return pd.read_csv(DETECTIONS_CSV, dtype=str, keep_default_na=False)
 
 
@@ -140,12 +148,19 @@ def render_grid(df: pd.DataFrame) -> None:
     )
 
 
-def render_crops(df_detections: pd.DataFrame, df_mapping: pd.DataFrame) -> None:
+def render_crops(df_detections: pd.DataFrame | None, df_mapping: pd.DataFrame) -> None:
     """Crop-review grid: original image beside its crop, with detection metrics.
 
     One row per detection (an image with two cats yields two rows). No-detection
     rows are kept: the original shows, the crop cell is blank.
     """
+    if df_detections is None:
+        st.warning(
+            "Detection results not found at `data/crops/indy/detections.csv`. "
+            "Run `uv run python scripts/detect_indy_gallery.py` to generate them."
+        )
+        return
+
     merged = df_detections.merge(
         df_mapping[["new_filename", "notes"]],
         left_on="source_filename",
@@ -187,6 +202,12 @@ def main() -> None:
     st.title("Indy image mapping review")
 
     df = load_mapping()
+    if df is None:
+        st.error(
+            "Mapping CSV not found at `images/indy/mapping.csv`. It is the source "
+            "of truth for this review -- there is nothing to show without it."
+        )
+        return
     st.write(f"{len(df)} photos. Reviewing labels in `images/indy/mapping.csv`.")
 
     view = st.sidebar.radio(
