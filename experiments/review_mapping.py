@@ -1,16 +1,20 @@
-"""Streamlit review view for the Indy image mapping CSV.
+"""Streamlit review view for the Indy image mapping and crop results.
 
-Throwaway experiment with two goals:
+Throwaway experiment with these goals:
 
 1. Give Indy's owner a scrollable, image-by-image view of the mapping metadata
    so the labels in ``images/indy/mapping.csv`` can be sanity-checked.
 2. Evaluate Streamlit's screen-reader accessibility *in practice* (an open
-   question in this project), by offering two layouts of the same data:
+   question in this project), by offering two views of the same mapping data:
      - "Rows": each photo is a heading-led section with text fields. The most
        accessible shape Streamlit can reasonably produce (navigable by heading).
      - "Data grid": the literal ``st.dataframe`` + ``ImageColumn`` table, which
        has known accessibility limits -- included so the difference is felt
        directly rather than assumed.
+3. Review the detect-and-crop results in ``data/crops/indy/detections.csv`` via
+   a third view, "Crop review": a grid showing each detection's original image
+   next to its crop, plus the detection metrics and the mapping notes -- so the
+   detector's crops can be eyeballed for correctness.
 
 Run:
     uv run streamlit run experiments/review_mapping.py
@@ -26,6 +30,9 @@ import streamlit as st
 
 INDY_DIR = Path(__file__).resolve().parent.parent / "images" / "indy"
 MAPPING_CSV = INDY_DIR / "mapping.csv"
+
+CROPS_DIR = Path(__file__).resolve().parent.parent / "data" / "crops" / "indy"
+DETECTIONS_CSV = CROPS_DIR / "detections.csv"
 
 # Streamlit serves files under this script's sibling `static/` dir at the URL
 # `app/static/<file>` when `server.enableStaticServing` is on (see
@@ -44,15 +51,27 @@ def load_mapping() -> pd.DataFrame:
     return pd.read_csv(MAPPING_CSV, dtype=str)
 
 
-def sync_static_images(filenames: list[str]) -> None:
-    """Copy the mapping's photos into ``static/`` so the app can serve them.
+@st.cache_data
+def load_detections() -> pd.DataFrame:
+    """Load the detect-and-crop results CSV as strings.
 
-    The photos' source of truth stays ``images/indy``; this keeps a local mirror
-    in sync, copying only files that are missing or have changed since last run.
+    ``keep_default_na=False`` renders blank cells (no-detection rows, where the
+    crop/confidence fields are empty) as empty strings rather than ``NaN``.
+    """
+    return pd.read_csv(DETECTIONS_CSV, dtype=str, keep_default_na=False)
+
+
+def sync_static_images(filenames: list[str], src_dir: Path = INDY_DIR) -> None:
+    """Copy images from ``src_dir`` into ``static/`` so the app can serve them.
+
+    The images' source of truth stays ``src_dir``; this keeps a local mirror in
+    sync, copying only files that are missing or have changed since last run.
+    Originals (``images/indy``) and crops (``data/crops/indy``) share the mirror;
+    crop filenames carry a ``_crop{N}`` suffix so they never collide.
     """
     STATIC_DIR.mkdir(exist_ok=True)
     for name in filenames:
-        src = INDY_DIR / name
+        src = src_dir / name
         if not src.exists():
             continue
         dst = STATIC_DIR / name
@@ -60,9 +79,9 @@ def sync_static_images(filenames: list[str]) -> None:
             shutil.copy2(src, dst)
 
 
-def static_url(filename: str) -> str | None:
+def static_url(filename: str, src_dir: Path = INDY_DIR) -> str | None:
     """URL for serving an image via static serving, or ``None`` if missing."""
-    if (INDY_DIR / filename).exists():
+    if filename and (src_dir / filename).exists():
         return f"{APP_STATIC_URL}/{filename}"
     return None
 
@@ -121,6 +140,48 @@ def render_grid(df: pd.DataFrame) -> None:
     )
 
 
+def render_crops(df_detections: pd.DataFrame, df_mapping: pd.DataFrame) -> None:
+    """Crop-review grid: original image beside its crop, with detection metrics.
+
+    One row per detection (an image with two cats yields two rows). No-detection
+    rows are kept: the original shows, the crop cell is blank.
+    """
+    merged = df_detections.merge(
+        df_mapping[["new_filename", "notes"]],
+        left_on="source_filename",
+        right_on="new_filename",
+        how="left",
+    )
+
+    sync_static_images(merged["source_filename"].tolist(), INDY_DIR)
+    sync_static_images([c for c in merged["crop_filename"] if c], CROPS_DIR)
+
+    grid = pd.DataFrame(
+        {
+            "original": [
+                static_url(name, INDY_DIR) for name in merged["source_filename"]
+            ],
+            "crop": [static_url(name, CROPS_DIR) for name in merged["crop_filename"]],
+            "source_filename": merged["source_filename"],
+            "n_detections": merged["n_detections"],
+            "crop_filename": merged["crop_filename"],
+            "confidence": merged["confidence"],
+            "area_fraction": merged["area_fraction"],
+            "notes": merged["notes"],
+        }
+    )
+    st.dataframe(
+        grid,
+        hide_index=True,
+        row_height=120,
+        height="content",
+        column_config={
+            "original": st.column_config.ImageColumn("original", width="medium"),
+            "crop": st.column_config.ImageColumn("crop", width="medium"),
+        },
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="Indy mapping review", layout="wide")
     st.title("Indy image mapping review")
@@ -128,16 +189,21 @@ def main() -> None:
     df = load_mapping()
     st.write(f"{len(df)} photos. Reviewing labels in `images/indy/mapping.csv`.")
 
-    layout = st.sidebar.radio(
-        "Layout",
-        options=("Rows (accessible)", "Data grid"),
-        help="Two renderings of the same data, for comparing screen-reader behaviour.",
+    view = st.sidebar.radio(
+        "View",
+        options=("Rows (accessible)", "Data grid", "Crop review"),
+        help=(
+            "Rows/Data grid are two renderings of the mapping data, for comparing "
+            "screen-reader behaviour. Crop review shows the detect-and-crop results."
+        ),
     )
 
-    if layout == "Rows (accessible)":
+    if view == "Rows (accessible)":
         render_rows(df)
-    else:
+    elif view == "Data grid":
         render_grid(df)
+    else:
+        render_crops(load_detections(), df)
 
 
 if __name__ == "__main__":
