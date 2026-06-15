@@ -1,0 +1,207 @@
+"""Build Indy's gallery embeddings: detect -> crop -> embed, in one pass.
+
+This is the real producer of the gallery the live decision compares against.
+It detects the cat in each Indy photo on the fly (it does NOT depend on
+``detect_indy_gallery.py`` having run -- that script is a separate, purely
+textual sanity-check of the detector). For each photo it embeds the
+highest-confidence crop, which review of the detections established is Indy
+himself; any lower-confidence extra detection is an error (a dog beside him, a
+cat-print blanket) and is dropped. A photo with no cat detected is reported and
+skipped -- never embedded as a full frame.
+
+Pass ``--no-detect`` to embed the full frame instead of the cat crop; this is
+the toggle that lets the detect-and-crop stage's effect on accuracy be measured
+rather than assumed.
+
+Output (two row-aligned files in ``--out-dir``):
+    embeddings.npy   float32 array of shape (n_rows, embedding_dim); row i is
+                     the vector for the crop described by row i of the CSV.
+    metadata.csv     one row per embedding, recording provenance so the
+                     gallery/calibration/test split can be done later as a
+                     text check.
+
+Usage:
+    uv run python scripts/build_indy_gallery.py
+    uv run python scripts/build_indy_gallery.py --no-detect
+    uv run python scripts/build_indy_gallery.py --model facebook/dinov2-large
+"""
+
+import argparse
+import csv
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from _common import iter_images, load_image
+from indycat.detection import CatDetector, Detection, detect_and_crop
+from indycat.embedding import Embedder
+
+REPO_ROOT = Path(__file__).parent.parent
+
+METADATA_COLUMNS = [
+    "row",  # explicit index, redundant with order but greppable
+    "source_filename",
+    "detect_used",  # True / False -- records the toggle per row
+    "confidence",  # empty when --no-detect
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "area_fraction",  # empty when --no-detect
+]
+
+
+@dataclass
+class GalleryRow:
+    """Provenance for one embedding; ``detection`` is None under --no-detect."""
+
+    source_filename: str
+    detection: Detection | None
+
+
+def embed_in_batches(
+    embedder: Embedder, images: list[Image.Image], batch_size: int
+) -> np.ndarray:
+    """Embed ``images`` in chunks so large datasets don't blow up GPU memory.
+
+    For Indy's ~35 crops one batch would do, but the chunking is what lets this
+    same routine scale to the ~2000 Oxford crops later.
+    """
+    if not images:
+        return np.empty((0, embedder.embedding_dim), dtype=np.float32)
+    chunks = [
+        embedder.embed_batch(images[start : start + batch_size])
+        for start in range(0, len(images), batch_size)
+    ]
+    return np.concatenate(chunks, axis=0)
+
+
+def write_metadata(rows: list[GalleryRow], csv_path: Path) -> None:
+    """One CSV row per embedding, aligned by index to the .npy array rows."""
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(METADATA_COLUMNS)
+        for index, row in enumerate(rows):
+            det = row.detection
+            if det is None:
+                writer.writerow(
+                    [index, row.source_filename, False, "", "", "", "", "", ""]
+                )
+                continue
+            x1, y1, x2, y2 = det.box_xyxy
+            writer.writerow(
+                [
+                    index,
+                    row.source_filename,
+                    True,
+                    f"{det.confidence:.4f}",
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    f"{det.area_fraction:.4f}",
+                ]
+            )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Build Indy's gallery embeddings (detect -> crop -> embed)."
+    )
+    parser.add_argument(
+        "--images-dir",
+        type=Path,
+        default=REPO_ROOT / "images" / "indy",
+        help="folder of input photos (default: images/indy)",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=REPO_ROOT / "data" / "embeddings" / "indy",
+        help="folder for embeddings.npy + metadata.csv (default: data/embeddings/indy)",
+    )
+    parser.add_argument(
+        "--model",
+        default="facebook/dinov2-base",
+        help="DINOv2 model id (default: facebook/dinov2-base)",
+    )
+    parser.add_argument(
+        "--no-detect",
+        action="store_true",
+        help="embed the full frame instead of the cat crop (the detect toggle)",
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.25,
+        help="discard detections below this confidence (default: 0.25)",
+    )
+    parser.add_argument(
+        "--margin",
+        type=float,
+        default=0.1,
+        help="crop margin as a fraction of the box size (default: 0.1)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=32,
+        help="images per embedding forward pass (default: 32)",
+    )
+    args = parser.parse_args()
+
+    photos = iter_images(args.images_dir)
+    if not photos:
+        raise SystemExit(f"no images found in {args.images_dir}")
+
+    detector = (
+        None
+        if args.no_detect
+        else CatDetector(model="yolo11x.pt", min_confidence=args.min_confidence)
+    )
+
+    crops: list[Image.Image] = []
+    rows: list[GalleryRow] = []
+    no_cat: list[str] = []
+    for path in photos:
+        image = load_image(path)
+        if detector is None:
+            crops.append(image)
+            rows.append(GalleryRow(path.name, None))
+            print(f"{path.name}: full frame (detect off)")
+            continue
+        pairs = detect_and_crop(image, detector, args.margin)
+        if not pairs:
+            no_cat.append(path.name)
+            print(f"{path.name}: NO CAT DETECTED -- skipped")
+            continue
+        # Highest-confidence detection is Indy; any extras are errors.
+        detection, crop = pairs[0]
+        crops.append(crop)
+        rows.append(GalleryRow(path.name, detection))
+        extra = f" ({len(pairs)} detections, kept top)" if len(pairs) > 1 else ""
+        print(f"{path.name}: confidence {detection.confidence:.2f}{extra}")
+
+    print(f"\nLoading embedder ({args.model})...")
+    embedder = Embedder(model=args.model)
+    embeddings = embed_in_batches(embedder, crops, args.batch_size)
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    np.save(args.out_dir / "embeddings.npy", embeddings)
+    write_metadata(rows, args.out_dir / "metadata.csv")
+
+    print(
+        f"\nSummary: {len(photos)} photos, {len(rows)} embeddings "
+        f"of dim {embedder.embedding_dim} written to {args.out_dir}"
+    )
+    print(f"  device: {embedder.device}")
+    if no_cat:
+        print(f"  {len(no_cat)} with NO cat detected (skipped): {', '.join(no_cat)}")
+    else:
+        print("  every photo produced an embedding")
+
+
+if __name__ == "__main__":
+    main()

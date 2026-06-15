@@ -4,7 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Early implementation. The first pipeline stage exists: `src/indycat/detection.py` (detect & crop; `CatDetector` takes an opened PIL image — callers own I/O) with `scripts/detect_indy_gallery.py` driving it over the Indy photos and `tests/test_detection.py` covering it. Measured on the 35 photos, yolo11n missed 8 cats and yolo11m 2, so **yolo11x is the default detector**. torch is installed with CUDA from the pytorch-cu128 index (PyPI's Windows wheel is CPU-only — keep the `tool.uv` index pinning); GPU verified working. Embed and decide stages are not yet written; their module layout is still open.
+Early implementation. The first two pipeline stages exist:
+
+- **Detect & crop** — `src/indycat/detection.py`: `CatDetector` takes an opened PIL image (callers own I/O), and `detect_and_crop` composes detect+crop into the shared pipeline prefix. `scripts/detect_indy_gallery.py` drives it over the Indy photos as a textual sanity-check tool; `tests/test_detection.py` covers it. Measured on the 35 photos, yolo11n missed 8 cats and yolo11m 2, so **yolo11x is the default detector**.
+- **Embed** — `src/indycat/embedding.py`: `Embedder` wraps a frozen DINOv2 (base) via HF `transformers`; `embed`/`embed_batch` return **raw, un-normalized** float32 vectors (normalization is deferred to decide). `tests/test_embedding.py` covers it. `scripts/build_indy_gallery.py` is the real gallery producer — it detects on the fly (does **not** depend on the sanity-check script) and writes `data/embeddings/indy/embeddings.npy` row-aligned with `metadata.csv`. Shared script helpers (`load_image`, `iter_images`) live in `scripts/_common.py`.
+
+torch is installed with CUDA from the pytorch-cu128 index (PyPI's Windows wheel is CPU-only — keep the `tool.uv` index pinning); GPU verified working. The **decide stage is not yet written**; its module layout is still open.
 
 ## Tooling & commands
 
@@ -22,7 +27,7 @@ Lint/format with **ruff** and type-check with **mypy** (`uv run ruff check`, `uv
 
 ## File structure
 
-- `src/indycat/` — **the core**: the importable, UI-agnostic detect→crop→embed→decide pipeline. Currently only `__init__.py`; internal module layout to be decided later. The core never imports from `scripts/` or `experiments/`.
+- `src/indycat/` — **the core**: the importable, UI-agnostic detect→crop→embed→decide pipeline. Currently `detection.py` and `embedding.py` (decide module still to come). The core never imports from `scripts/` or `experiments/`.
 - `scripts/` — **keepers**: reusable, maintained entry points that drive the core (build gallery, embed datasets, calibrate, evaluate, UI launchers).
 - `experiments/` — **throwaway**: exploratory one-offs, the "each data addition is a measured experiment" scratch space. Committed (shared dependency set); promote anything worth keeping into `scripts/`.
 - `tests/` — pytest suite.
@@ -57,11 +62,11 @@ Precompute and store Indy's gallery embeddings as vectors; do not recompute from
 
 ## Data rules (these prevent silently-wrong accuracy numbers)
 
-- **Positives:** 35 Indy photos on hand in `images/indy/`, renamed to descriptive `<position>_<location>_<view>_<NN>.<ext>` names (the `NN` counter is a stable per-photo handle). `images/indy/mapping.csv` is the source of truth: it records each photo's original filename (preserving the session/occasion signal for split discipline) plus inspectable `position,location,view,head_visible,tail_visible,notes` fields — use `head_visible`/`tail_visible` to pick gallery photos without looking at the images. Plan ≈15 for the gallery, ≈20 held out for testing. Variety (angle, distance, lighting, background) matters more than count; photos clearly showing his **head markings and tail** carry the most identifying information.
-- **Negatives:** start from the **Oxford-IIIT Pet dataset** (use *all* its cat images; under the threshold decision their count is free at prediction time). Its long-haired breeds (Maine Coon, Ragdoll, Birman) are built-in hard negatives. Optionally add a Norwegian Forest Cat set later — but **community dataset breed labels are unreliable** (NFC/Maine Coon/Siberian confusion is rampant), so describe such a slice honestly as "look-alike long-haired cats," not guaranteed NFCs.
+- **Positives:** 35 Indy photos on hand in `images/indy/`, renamed to descriptive `<position>_<location>_<view>_<NN>.<ext>` names (the `NN` counter is a stable per-photo handle). `images/indy/mapping.csv` is the source of truth: it records each photo's original filename plus inspectable `position,location,view,head_visible,tail_visible,notes` fields — use `head_visible`/`tail_visible` to pick gallery photos without looking at the images. Plan ≈15 for the gallery, ≈20 held out for testing. Variety (angle, distance, lighting, background) matters more than count; photos clearly showing his **head markings and tail** carry the most identifying information.
+- **Negatives:** start from the **Oxford-IIIT Pet dataset** (use *all* its cat images; under the threshold decision their count is free at prediction time). Its long-haired breeds (Maine Coon, Ragdoll, Birman) are built-in hard negatives. **Run the same YOLO detector over Oxford rather than reusing its shipped bounding boxes** — those are head-only ROI boxes, which would mismatch Indy's full-body crops and bias the threshold; re-detecting keeps positives and negatives on identical footing (the gallery builder already detects on the fly, so the negatives script reuses the same path). Optionally add a Norwegian Forest Cat set later — but **community dataset breed labels are unreliable** (NFC/Maine Coon/Siberian confusion is rampant), so describe such a slice honestly as "look-alike long-haired cats," not guaranteed NFCs.
 - **Split discipline:**
   - **Disjoint at the image level.** The same photograph must never be used both to set up the system (gallery, calibration) and to test it. Breed-level overlap is fine and desirable (Maine Coons on both sides), the same *photo* is not. Split once up front (e.g. 70% calibration / 30% locked test) and never move anything across.
-  - **For Indy's photos, split by occasion/scene, not by shuffling individual photos.** Burst shots from one session are near-duplicates; putting them on both sides of the split makes recall look artificially perfect. All shots from one session go to the same side. File timestamps encode the session, so this is a text check.
+  - **Indy's 35 photos are hand-curated and contain no burst shots, so no per-session split is needed.** The general occasion-based rule (keep all near-duplicate shots from one session on the same side) does not apply to this set — image-level disjointness above is enough. Revisit this only if a future batch of Indy photos includes bursts from a single session.
   - Fix a **held-out test set up front and never touch it during setup.** It must include a slice of **look-alike long-haired cats that never appear in the gallery or calibration negatives** — that slice is the real exam.
 
 ## Evaluation

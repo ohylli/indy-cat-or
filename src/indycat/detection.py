@@ -84,6 +84,30 @@ class CatDetector:
         return DetectionResult(image_size=(width, height), detections=detections)
 
 
+def detect_and_crop(
+    image: Image.Image,
+    detector: CatDetector,
+    margin: float = 0.1,
+) -> list[tuple[Detection, Image.Image]]:
+    """Detect cats and pair each detection with its cropped image.
+
+    This is the pipeline prefix shared by every caller that embeds on the fly:
+    the gallery builder and any prediction path both detect, then crop, then
+    hand the crops to the embedder. Results are ordered highest-confidence
+    first (following ``DetectionResult.detections``).
+
+    An empty list is the explicit "no cat" case; callers must handle it and not
+    silently fall back to the full frame. The detect toggle lives in the
+    caller, not here: to embed without detection, skip this entirely and pass
+    the full image straight to the embedder.
+    """
+    result = detector.detect(image)
+    return [
+        (detection, crop_with_margin(image, detection.box_xyxy, margin))
+        for detection in result.detections
+    ]
+
+
 def crop_with_margin(
     image: Image.Image,
     box_xyxy: tuple[int, int, int, int],

@@ -18,8 +18,9 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image
 
+from _common import iter_images, load_image
 from indycat.detection import CatDetector, DetectionResult, crop_with_margin
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -52,15 +53,6 @@ class ImageReport:
     #: Aligned 1:1 with ``result.detections``; ``None`` where no crop was saved
     #: (secondary detections when not running with --all-crops).
     crop_filenames: list[str | None]
-
-
-def load_image(path: Path) -> Image.Image:
-    """Open an image with EXIF orientation applied.
-
-    Phone photos often store rotation as an EXIF tag; applying it here makes
-    the box coordinates and the saved crops match the photo as displayed.
-    """
-    return ImageOps.exif_transpose(Image.open(path))
 
 
 def save_crop(crop: Image.Image, path: Path) -> None:
@@ -231,8 +223,7 @@ def main() -> None:
         "--all-crops",
         action="store_true",
         help=(
-            "save a crop for every detection "
-            "(default: only the highest-confidence one)"
+            "save a crop for every detection (default: only the highest-confidence one)"
         ),
     )
     parser.add_argument(
@@ -254,11 +245,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    photos = sorted(
-        p
-        for p in args.images_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
-    )
+    photos = iter_images(args.images_dir)
     if not photos:
         raise SystemExit(f"no images found in {args.images_dir}")
 
