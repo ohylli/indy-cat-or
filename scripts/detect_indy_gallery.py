@@ -1,12 +1,15 @@
 """Run the detect-and-crop stage over all Indy photos.
 
-Writes one crop per detection to the output folder (for sighted spot-review),
-prints a textual per-image report plus an aggregate summary (the primary,
-screen-reader-friendly verification), and optionally records every detection
-in a CSV.
+By default writes one crop per photo -- the highest-confidence detection -- to
+the output folder (for sighted spot-review). Pass ``--all-crops`` to instead
+write a crop for every detection. Either way it prints a textual per-image
+report plus an aggregate summary (the primary, screen-reader-friendly
+verification) describing *all* detections, and optionally records every
+detection in a CSV.
 
 Usage:
     uv run python scripts/detect_indy_gallery.py
+    uv run python scripts/detect_indy_gallery.py --all-crops
     uv run python scripts/detect_indy_gallery.py --csv data/crops/indy/detections.csv
 """
 
@@ -46,7 +49,9 @@ CSV_COLUMNS = [
 class ImageReport:
     filename: str
     result: DetectionResult
-    crop_filenames: list[str]
+    #: Aligned 1:1 with ``result.detections``; ``None`` where no crop was saved
+    #: (secondary detections when not running with --all-crops).
+    crop_filenames: list[str | None]
 
 
 def load_image(path: Path) -> Image.Image:
@@ -67,17 +72,23 @@ def save_crop(crop: Image.Image, path: Path) -> None:
 
 
 def process_image(
-    path: Path, detector: CatDetector, out_dir: Path, margin: float
+    path: Path, detector: CatDetector, out_dir: Path, margin: float, all_crops: bool
 ) -> ImageReport:
     image = load_image(path)
     result = detector.detect(image)
-    crop_filenames = []
+    # Detections are sorted highest-confidence-first, so index 1 is the top
+    # crop. By default only it is written; --all-crops writes every detection.
+    crop_filenames: list[str | None] = []
     for index, detection in enumerate(result.detections, start=1):
-        crop_name = f"{path.stem}_crop{index}{path.suffix.lower()}"
-        save_crop(
-            crop_with_margin(image, detection.box_xyxy, margin), out_dir / crop_name
-        )
-        crop_filenames.append(crop_name)
+        if all_crops or index == 1:
+            crop_name = f"{path.stem}_crop{index}{path.suffix.lower()}"
+            save_crop(
+                crop_with_margin(image, detection.box_xyxy, margin),
+                out_dir / crop_name,
+            )
+            crop_filenames.append(crop_name)
+        else:
+            crop_filenames.append(None)
     return ImageReport(path.name, result, crop_filenames)
 
 
@@ -96,9 +107,10 @@ def describe(report: ImageReport) -> str:
             flags += ", LOW CONFIDENCE"
         if detection.area_fraction > NEAR_FULL_FRAME:
             flags += ", NEARLY FULL FRAME"
+        crop_note = f"-> {crop_name}" if crop_name else "(crop not saved)"
         line = (
             f"confidence {detection.confidence:.2f}, "
-            f"{detection.area_fraction:.0%} of frame{flags} -> {crop_name}"
+            f"{detection.area_fraction:.0%} of frame{flags} {crop_note}"
         )
         if count == 1:
             lines.append(f"{report.filename}: 1 cat, {line}")
@@ -132,7 +144,7 @@ def summarize(reports: list[ImageReport], out_dir: Path) -> str:
         if len(r.result.detections) == 1
         and r.result.detections[0].confidence >= LOW_CONFIDENCE
     )
-    n_crops = sum(len(r.crop_filenames) for r in reports)
+    n_crops = sum(1 for r in reports for c in r.crop_filenames if c)
     lines = [
         f"Summary: {len(reports)} images, {n_crops} crops written to {out_dir}",
         f"  {clean} images with exactly one cat at confidence >= {LOW_CONFIDENCE}",
@@ -180,7 +192,7 @@ def write_csv(reports: list[ImageReport], csv_path: Path) -> None:
                         report.filename,
                         n,
                         index,
-                        crop_name,
+                        crop_name or "",
                         f"{detection.confidence:.4f}",
                         x1,
                         y1,
@@ -214,6 +226,14 @@ def main() -> None:
         type=Path,
         default=None,
         help="also write detection details to this CSV",
+    )
+    parser.add_argument(
+        "--all-crops",
+        action="store_true",
+        help=(
+            "save a crop for every detection "
+            "(default: only the highest-confidence one)"
+        ),
     )
     parser.add_argument(
         "--model",
@@ -252,7 +272,9 @@ def main() -> None:
     detector = CatDetector(model=args.model, min_confidence=args.min_confidence)
     reports = []
     for path in photos:
-        report = process_image(path, detector, args.out_dir, args.margin)
+        report = process_image(
+            path, detector, args.out_dir, args.margin, args.all_crops
+        )
         print(describe(report))
         reports.append(report)
 
