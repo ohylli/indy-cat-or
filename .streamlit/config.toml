@@ -1,6 +1,6 @@
 [server]
 # Serve files under an app's sibling `static/` dir at the URL `app/static/<file>`.
-# Used by experiments/review_mapping.py so the data-grid layout can reference
+# Used by scripts/data_review/ so the data-grid layout can reference
 # images by a short path instead of inlining megabyte base64 data URLs (which a
 # screen reader would otherwise read out in full for the image cell).
 enableStaticServing = true
