@@ -26,6 +26,9 @@ __pycache__/
 /images/indy/*
 !/images/indy/mapping.csv
 
+# Oxford-IIIT Pet: downloaded negatives, local only (like the Indy photos).
+/images/oxford-iiit-pet/
+
 # Streamlit app static dir: a local copy of the photos for the data-review
 # app's data grid, synced from images/indy at runtime — reproducible.
 /scripts/data_review/static/

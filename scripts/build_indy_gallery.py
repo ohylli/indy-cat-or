@@ -28,81 +28,33 @@ Usage:
 
 import argparse
 import csv
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from _common import iter_images, load_image
-from indycat.detection import CatDetector, Detection, detect_and_crop
+from _common import (
+    BASE_METADATA_COLUMNS,
+    GalleryRow,
+    base_metadata_cells,
+    embed_in_batches,
+    iter_images,
+    load_image,
+)
+from indycat.detection import CatDetector, detect_and_crop
 from indycat.embedding import Embedder
 
 REPO_ROOT = Path(__file__).parent.parent
-
-METADATA_COLUMNS = [
-    "row",  # explicit index, redundant with order but greppable
-    "source_filename",
-    "detect_used",  # True / False -- records the toggle per row
-    "confidence",  # empty when --no-detect
-    "x1",
-    "y1",
-    "x2",
-    "y2",
-    "area_fraction",  # empty when --no-detect
-]
-
-
-@dataclass
-class GalleryRow:
-    """Provenance for one embedding; ``detection`` is None under --no-detect."""
-
-    source_filename: str
-    detection: Detection | None
-
-
-def embed_in_batches(
-    embedder: Embedder, images: list[Image.Image], batch_size: int
-) -> np.ndarray:
-    """Embed ``images`` in chunks so large datasets don't blow up GPU memory.
-
-    For Indy's ~35 crops one batch would do, but the chunking is what lets this
-    same routine scale to the ~2000 Oxford crops later.
-    """
-    if not images:
-        return np.empty((0, embedder.embedding_dim), dtype=np.float32)
-    chunks = [
-        embedder.embed_batch(images[start : start + batch_size])
-        for start in range(0, len(images), batch_size)
-    ]
-    return np.concatenate(chunks, axis=0)
 
 
 def write_metadata(rows: list[GalleryRow], csv_path: Path) -> None:
     """One CSV row per embedding, aligned by index to the .npy array rows."""
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(METADATA_COLUMNS)
+        writer.writerow(BASE_METADATA_COLUMNS)
         for index, row in enumerate(rows):
-            det = row.detection
-            if det is None:
-                writer.writerow(
-                    [index, row.source_filename, False, "", "", "", "", "", ""]
-                )
-                continue
-            x1, y1, x2, y2 = det.box_xyxy
             writer.writerow(
-                [
-                    index,
-                    row.source_filename,
-                    True,
-                    f"{det.confidence:.4f}",
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    f"{det.area_fraction:.4f}",
-                ]
+                base_metadata_cells(index, row.source_filename, row.detection)
             )
 
 
