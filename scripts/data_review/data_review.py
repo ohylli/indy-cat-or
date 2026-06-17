@@ -21,12 +21,32 @@ from __future__ import annotations
 
 import crops
 import mapping
+import misses
 import streamlit as st
 
 
 def main() -> None:
     st.set_page_config(page_title="Indy data review", layout="wide")
     st.title("Indy image mapping review")
+
+    view = st.sidebar.radio(
+        "View",
+        options=(
+            "Rows (accessible)",
+            "Data grid",
+            "Crop review",
+            "Oxford detect misses",
+        ),
+        help=(
+            "Rows/Data grid are two renderings of the mapping data, for comparing "
+            "screen-reader behaviour. Crop review shows the detect-and-crop results. "
+            "Oxford detect misses shows the negatives the detector failed to find."
+        ),
+    )
+
+    if view == "Oxford detect misses":
+        misses.render_misses(misses.load_misses())
+        return
 
     df = mapping.load_mapping()
     if df is None:
@@ -36,15 +56,6 @@ def main() -> None:
         )
         return
     st.write(f"{len(df)} photos. Reviewing labels in `images/indy/mapping.csv`.")
-
-    view = st.sidebar.radio(
-        "View",
-        options=("Rows (accessible)", "Data grid", "Crop review"),
-        help=(
-            "Rows/Data grid are two renderings of the mapping data, for comparing "
-            "screen-reader behaviour. Crop review shows the detect-and-crop results."
-        ),
-    )
 
     if view == "Rows (accessible)":
         mapping.render_rows(df)

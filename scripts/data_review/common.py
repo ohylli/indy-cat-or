@@ -13,6 +13,11 @@ MAPPING_CSV = INDY_DIR / "mapping.csv"
 CROPS_DIR = REPO_ROOT / "data" / "crops" / "indy"
 DETECTIONS_CSV = CROPS_DIR / "detections.csv"
 
+OXFORD_DIR = REPO_ROOT / "images" / "oxford-iiit-pet"
+OXFORD_IMAGES_DIR = OXFORD_DIR / "images"
+OXFORD_CATALOG_CSV = OXFORD_DIR / "catalog.csv"
+OXFORD_METADATA_CSV = REPO_ROOT / "data" / "embeddings" / "oxford" / "metadata.csv"
+
 # Streamlit serves files under the main script's sibling `static/` dir at the URL
 # `app/static/<file>` when `server.enableStaticServing` is on (see
 # .streamlit/config.toml). The grid references images this way -- a short path
