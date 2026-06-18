@@ -41,7 +41,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
 INDY_METADATA = REPO_ROOT / "data" / "embeddings" / "indy" / "metadata.csv"
+INDY_EMBEDDINGS = REPO_ROOT / "data" / "embeddings" / "indy" / "embeddings.npy"
 OXFORD_METADATA = REPO_ROOT / "data" / "embeddings" / "oxford" / "metadata.csv"
+OXFORD_EMBEDDINGS = REPO_ROOT / "data" / "embeddings" / "oxford" / "embeddings.npy"
 INDY_MAPPING = REPO_ROOT / "images" / "indy" / "mapping.csv"
 SPLITS_DIR = REPO_ROOT / "data" / "splits"
 

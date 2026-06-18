@@ -1,0 +1,278 @@
+"""Measure and report the calibration score distributions (V0).
+
+The V0 slice of ``docs/calibration_design.md`` Sec. 5: *distributions only, no
+threshold chosen.* This module scores the held-back Indy positives and the
+Oxford negatives against the gallery (via ``indycat.decision``) and renders the
+screen-reader-first textual report from Sec. 4 -- distribution tables, the
+positive/negative overlap, a look-alike-vs-easy breakdown, per-breed negative
+scores, and the worst false-positive / hardest-positive rows.
+
+It deliberately stops short of FPR-by-threshold and any cutoff: those need a
+threshold, which is V1/V2. Kept separate from ``calibrate.py`` so the CLI stays a
+thin driver and the measurement/report is unit-testable. ``test`` is never
+touched here -- only ``gallery`` (the references), ``calibration`` (positives),
+and the Oxford ``setup`` (negatives) roles take part.
+"""
+
+from __future__ import annotations
+
+import csv
+import math
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from numpy.typing import NDArray
+
+from indycat.decision import Aggregation, Gallery, score
+
+#: The long-haired Oxford breeds that look most like Indy -- the hard negative
+#: tail the threshold will have to sit above. Reported as one group *and* per
+#: breed, so Persian (et al.) stay individually visible regardless of grouping.
+LOOKALIKE_BREEDS = frozenset({"Maine_Coon", "Ragdoll", "Birman", "Persian"})
+
+#: How many worst-case rows the report lists for each risk section.
+_RISK_ROWS = 10
+
+
+@dataclass(frozen=True)
+class ScoredImage:
+    """One image scored against the gallery; ``breed`` is None for Indy positives."""
+
+    name: str
+    score: float
+    best_match: str
+    breed: str | None
+
+
+@dataclass(frozen=True)
+class Stats:
+    """Summary statistics of a score distribution (``n`` is the count)."""
+
+    n: int
+    mean: float
+    min: float
+    p50: float
+    p95: float
+    max: float
+
+
+def build_name_to_vector(
+    names: list[str], vectors: NDArray[np.float32]
+) -> dict[str, NDArray[np.float32]]:
+    """Map each ``source_filename`` to its embedding row."""
+    return {name: vectors[i] for i, name in enumerate(names)}
+
+
+def select_vectors(
+    names: list[str], name_to_vector: dict[str, NDArray[np.float32]]
+) -> NDArray[np.float32]:
+    """Stack the vectors for ``names``; a name absent from the cache is loud.
+
+    A manifest references images by ``source_filename``; one missing from the
+    embeddings cache means the manifest and the cache disagree (a re-embed or an
+    Oxford no-cat miss), which must surface rather than silently shrink the role.
+    """
+    missing = [name for name in names if name not in name_to_vector]
+    if missing:
+        raise KeyError(
+            f"{len(missing)} manifest image(s) absent from the embeddings cache: "
+            f"{missing[:5]}{' ...' if len(missing) > 5 else ''}"
+        )
+    return np.stack([name_to_vector[name] for name in names])
+
+
+def score_role(
+    role_names: list[str],
+    name_to_vector: dict[str, NDArray[np.float32]],
+    gallery: Gallery,
+    aggregation: Aggregation,
+    breeds: dict[str, str] | None = None,
+) -> list[ScoredImage]:
+    """Score every image in a role against the gallery."""
+    missing = [name for name in role_names if name not in name_to_vector]
+    if missing:
+        raise KeyError(
+            f"{len(missing)} manifest image(s) absent from the embeddings cache: "
+            f"{missing[:5]}{' ...' if len(missing) > 5 else ''}"
+        )
+    scored: list[ScoredImage] = []
+    for name in role_names:
+        match = score(name_to_vector[name], gallery, aggregation)
+        breed = breeds.get(name) if breeds is not None else None
+        scored.append(ScoredImage(name, match.score, match.best_name, breed))
+    return scored
+
+
+def summarize(scores: list[float]) -> Stats:
+    """Distribution summary; an empty list yields zero count and NaN stats."""
+    if not scores:
+        nan = float("nan")
+        return Stats(0, nan, nan, nan, nan, nan)
+    arr = np.asarray(scores, dtype=np.float64)
+    return Stats(
+        n=len(scores),
+        mean=float(arr.mean()),
+        min=float(arr.min()),
+        p50=float(np.percentile(arr, 50)),
+        p95=float(np.percentile(arr, 95)),
+        max=float(arr.max()),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Report rendering
+# --------------------------------------------------------------------------- #
+
+
+def _fmt(value: float) -> str:
+    """Format a score for the report (NaN -> dash)."""
+    return "  -  " if math.isnan(value) else f"{value:.3f}"
+
+
+def _stats_row(label: str, stats: Stats, width: int) -> str:
+    return (
+        f"  {label:<{width}} {stats.n:>5}  {_fmt(stats.mean)}  {_fmt(stats.min)}  "
+        f"{_fmt(stats.p50)}  {_fmt(stats.p95)}  {_fmt(stats.max)}"
+    )
+
+
+def _distribution_section(
+    positives: list[ScoredImage], negatives: list[ScoredImage], aggregation: Aggregation
+) -> list[str]:
+    pos = summarize([s.score for s in positives])
+    neg = summarize([s.score for s in negatives])
+    width = len("Oxford (neg)")
+    columns = f"{'n':>5}  {'mean':>5}  {'min':>5}  {'p50':>5}  {'p95':>5}  {'max':>5}"
+    header = " " * (2 + width + 1) + columns
+    return [
+        f"Score distribution (cosine to best gallery match, "
+        f"aggregation={aggregation}):",
+        header,
+        _stats_row("Indy (pos)", pos, width),
+        _stats_row("Oxford (neg)", neg, width),
+    ]
+
+
+def _overlap_section(
+    positives: list[ScoredImage], negatives: list[ScoredImage]
+) -> list[str]:
+    if not positives or not negatives:
+        return ["", "  Overlap: need both positives and negatives to compare."]
+    lowest_pos = min(positives, key=lambda s: s.score)
+    highest_neg = max(negatives, key=lambda s: s.score)
+    lines = [
+        "",
+        f"  Lowest positive  {_fmt(lowest_pos.score)} ({lowest_pos.name})",
+        f"  Highest negative {_fmt(highest_neg.score)} "
+        f"({highest_neg.name}, {highest_neg.breed})",
+    ]
+    if lowest_pos.score > highest_neg.score:
+        gap = lowest_pos.score - highest_neg.score
+        lines.append(f"  -> clean gap of {_fmt(gap)} (distributions separate)")
+    else:
+        neg_above = sum(1 for s in negatives if s.score >= lowest_pos.score)
+        pos_below = sum(1 for s in positives if s.score <= highest_neg.score)
+        lines.append(
+            f"  -> OVERLAP: {neg_above} negative(s) score >= the lowest positive; "
+            f"{pos_below} positive(s) score <= the highest negative"
+        )
+    return lines
+
+
+def _group_section(negatives: list[ScoredImage]) -> list[str]:
+    look = [s for s in negatives if s.breed in LOOKALIKE_BREEDS]
+    easy = [s for s in negatives if s.breed not in LOOKALIKE_BREEDS]
+    lines = ["", "Negatives by group:"]
+    for label, group in (("look-alike", look), ("easy", easy)):
+        stats = summarize([s.score for s in group])
+        breeds = len({s.breed for s in group})
+        lines.append(
+            f"  {label:<11} ({breeds} breeds, n={stats.n}):  "
+            f"mean {_fmt(stats.mean)}  p95 {_fmt(stats.p95)}  max {_fmt(stats.max)}"
+        )
+    return lines
+
+
+def _per_breed_section(negatives: list[ScoredImage]) -> list[str]:
+    by_breed: dict[str, list[float]] = {}
+    for s in negatives:
+        by_breed.setdefault(s.breed or "(unknown)", []).append(s.score)
+    rows = [(breed, summarize(scores)) for breed, scores in by_breed.items()]
+    rows.sort(key=lambda r: r[1].max, reverse=True)
+    width = max((len(b) for b, _ in rows), default=5)
+    lines = [
+        "",
+        "Per-breed negative scores (sorted by max desc):",
+        f"  {'breed':<{width}} {'n':>5}  {'mean':>5}  {'p95':>5}  {'max':>5}",
+    ]
+    for breed, stats in rows:
+        tag = " *" if breed in LOOKALIKE_BREEDS else ""
+        lines.append(
+            f"  {breed:<{width}} {stats.n:>5}  {_fmt(stats.mean)}  "
+            f"{_fmt(stats.p95)}  {_fmt(stats.max)}{tag}"
+        )
+    lines.append("  (* = look-alike group)")
+    return lines
+
+
+def _risk_sections(
+    positives: list[ScoredImage], negatives: list[ScoredImage]
+) -> list[str]:
+    worst_neg = sorted(negatives, key=lambda s: s.score, reverse=True)[:_RISK_ROWS]
+    hardest_pos = sorted(positives, key=lambda s: s.score)[:_RISK_ROWS]
+    lines = ["", f"Highest-scoring negatives (false-positive risks, top {_RISK_ROWS}):"]
+    for s in worst_neg:
+        lines.append(
+            f"  {_fmt(s.score)}  {s.name}  ({s.breed})  -> best match {s.best_match}"
+        )
+    lines += ["", f"Lowest-scoring positives (recognition risks, bottom {_RISK_ROWS}):"]
+    for s in hardest_pos:
+        lines.append(f"  {_fmt(s.score)}  {s.name}  -> best match {s.best_match}")
+    return lines
+
+
+def build_report(
+    label: str,
+    gallery_size: int,
+    positives: list[ScoredImage],
+    negatives: list[ScoredImage],
+    aggregation: Aggregation,
+) -> str:
+    """Render the full V0 textual calibration report."""
+    breeds = len({s.breed for s in negatives})
+    header = [
+        f"Calibration: {label}   (aggregation={aggregation})",
+        f"  Gallery:    {gallery_size} Indy photos",
+        f"  Positives:  {len(positives)} Indy photos (calibration)",
+        f"  Negatives:  {len(negatives)} Oxford cats, {breeds} breeds",
+        "",
+    ]
+    sections = [
+        *_distribution_section(positives, negatives, aggregation),
+        *_overlap_section(positives, negatives),
+        *_group_section(negatives),
+        *_per_breed_section(negatives),
+        *_risk_sections(positives, negatives),
+    ]
+    return "\n".join([*header, *sections])
+
+
+def write_scores_csv(
+    path: Path, positives: list[ScoredImage], negatives: list[ScoredImage]
+) -> None:
+    """Write per-image scores joined with provenance for offline inspection.
+
+    Negatives first (worst false-positive risk on top), then positives (hardest
+    to recognise on top), each ordered so the rows that matter most lead.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["role", "source_filename", "score", "best_match", "breed"])
+        for s in sorted(negatives, key=lambda s: s.score, reverse=True):
+            writer.writerow(
+                ["negative", s.name, f"{s.score:.6f}", s.best_match, s.breed]
+            )
+        for s in sorted(positives, key=lambda s: s.score):
+            writer.writerow(["positive", s.name, f"{s.score:.6f}", s.best_match, ""])

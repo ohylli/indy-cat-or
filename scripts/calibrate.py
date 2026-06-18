@@ -1,29 +1,36 @@
-"""Calibrate the decide stage -- currently the split-manifest entry point.
+"""Calibrate the decide stage: split, score, and report the distributions (V0).
 
-The calibration step (scoring the held-back Indy positives and the Oxford
-negatives against the gallery to locate the threshold) is not implemented yet --
-this is the V0 generation slice of ``docs/calibration_design.md``. For now the
-tool generates and saves a reproducible split manifest; the scoring step will be
-added where the placeholder notice prints.
+This is the V0 slice of ``docs/calibration_design.md`` Sec. 5 -- *distributions
+only, no threshold chosen.* The command generates (or replays) a reproducible
+split manifest, then scores the held-back Indy positives and the Oxford
+negatives against the gallery and prints the textual distribution report. It
+answers the first question worth answering -- do the positive and negative score
+distributions separate at all? -- without picking any cutoff (that is V1/V2).
 
 Generation is folded into this one command (no separate generate/calibrate
-dance). The split logic itself lives in the reusable ``split_manifest`` module.
+dance). The split logic lives in the reusable ``split_manifest`` module; the
+scoring/report logic in ``calibration_report`` over the ``indycat.decision``
+core. ``--generate-only`` stops after writing the manifest.
 
 Usage::
 
     # zero-arg baseline: built-in defaults + built-in seed -> identical every time
     uv run python scripts/calibrate.py
 
-    # generate only, then stop (stays useful once calibration exists)
+    # generate only, then stop (skip scoring)
     uv run python scripts/calibrate.py --generate-only
 
     # specify the split
     uv run python scripts/calibrate.py --gallery 15 --calibration 10 --test 10 --seed 42
 
+    # the alternate aggregation, and an optional per-image score dump
+    uv run python scripts/calibrate.py --aggregation mean-top3 \
+        --scores-out data/splits/scores.csv
+
     # fresh random seed (the drawn seed is recorded in the written manifest)
     uv run python scripts/calibrate.py --random-seed
 
-    # replay / validate an exact prior split
+    # replay an exact prior split (scores it too)
     uv run python scripts/calibrate.py --manifest data/splits/run-<...>.yaml
 """
 
@@ -33,12 +40,25 @@ import argparse
 import random
 from pathlib import Path
 
+from _common import load_cached_embeddings
+from calibration_report import (
+    build_name_to_vector,
+    build_report,
+    score_role,
+    select_vectors,
+    write_scores_csv,
+)
+from indycat.decision import AGGREGATIONS, Aggregation, Gallery
 from split_manifest import (
     DEFAULT_CALIBRATION,
     DEFAULT_GALLERY,
     DEFAULT_OXFORD_TEST_FRACTION,
     DEFAULT_SEED,
     DEFAULT_TEST,
+    INDY_EMBEDDINGS,
+    INDY_METADATA,
+    OXFORD_EMBEDDINGS,
+    OXFORD_METADATA,
     PREFER_CHOICES,
     SPLITS_DIR,
     STRATEGY_THREE_WAY,
@@ -61,11 +81,6 @@ _GENERATION_FLAGS = (
     "prefer",
     "seed",
     "random_seed",
-)
-
-_NOT_IMPLEMENTED_NOTICE = (
-    "Calibration scoring is not yet implemented -- only the split manifest was "
-    "generated. See docs/calibration_design.md (V0)."
 )
 
 
@@ -132,6 +147,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="generate + save the manifest and stop (do not attempt calibration)",
     )
+    # Scoring options -- not generation flags, so they compose with --manifest.
+    parser.add_argument(
+        "--aggregation",
+        choices=AGGREGATIONS,
+        default="max",
+        help="how a query's per-gallery similarities collapse to one score "
+        "(default: max)",
+    )
+    parser.add_argument(
+        "--scores-out",
+        default=None,
+        help="optional CSV of per-image scores joined with provenance",
+    )
     return parser
 
 
@@ -184,6 +212,42 @@ def summarize(manifest: SplitManifest) -> str:
     return "\n".join(lines)
 
 
+def run_calibration(
+    manifest: SplitManifest,
+    label: str,
+    aggregation: Aggregation,
+    scores_out: Path | None,
+) -> None:
+    """Score the positives/negatives against the gallery and print the report.
+
+    The V0 measurement step: build the gallery from the ``gallery`` role, score
+    the held-back ``calibration`` positives and the Oxford ``setup`` negatives
+    against it, and emit the textual distribution report. The ``test`` role is
+    never read here -- that is ``evaluate.py``'s job.
+    """
+    indy_names, indy_vectors = load_cached_embeddings(INDY_METADATA, INDY_EMBEDDINGS)
+    oxford_names, oxford_vectors = load_cached_embeddings(
+        OXFORD_METADATA, OXFORD_EMBEDDINGS
+    )
+    indy_lookup = build_name_to_vector(indy_names, indy_vectors)
+    oxford_lookup = build_name_to_vector(oxford_names, oxford_vectors)
+    breeds = {record.source_filename: record.breed for record in load_oxford_metadata()}
+
+    gallery = Gallery.from_raw(
+        manifest.indy_gallery, select_vectors(manifest.indy_gallery, indy_lookup)
+    )
+    positives = score_role(manifest.indy_calibration, indy_lookup, gallery, aggregation)
+    negatives = score_role(
+        manifest.oxford_setup, oxford_lookup, gallery, aggregation, breeds=breeds
+    )
+
+    print()
+    print(build_report(label, len(gallery.names), positives, negatives, aggregation))
+    if scores_out is not None:
+        write_scores_csv(scores_out, positives, negatives)
+        print(f"\nPer-image scores written to {scores_out}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -202,6 +266,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.manifest is not None:
             manifest = load_manifest(Path(args.manifest))
+            label = args.manifest
             print(f"Loaded manifest: {args.manifest}")
             print(summarize(manifest))
         else:
@@ -215,14 +280,19 @@ def main(argv: list[str] | None = None) -> None:
                 else SPLITS_DIR / default_manifest_name(params)
             )
             write_manifest(manifest, out_path)
+            label = str(out_path)
             print(f"Wrote manifest: {out_path}")
             print(summarize(manifest))
+
+        if not args.generate_only:
+            run_calibration(
+                manifest,
+                label,
+                args.aggregation,
+                Path(args.scores_out) if args.scores_out is not None else None,
+            )
     except SplitConfigError as err:
         raise SystemExit(str(err)) from err
-
-    if not args.generate_only and args.manifest is None:
-        print()
-        print(_NOT_IMPLEMENTED_NOTICE)
 
 
 if __name__ == "__main__":

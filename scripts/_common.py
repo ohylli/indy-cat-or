@@ -7,10 +7,12 @@ core never imports from ``scripts/``; scripts import from the core and from
 here.
 """
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image, ImageOps
 
 from indycat.detection import Detection
@@ -77,6 +79,28 @@ def embed_in_batches(
         for start in range(0, len(images), batch_size)
     ]
     return np.concatenate(chunks, axis=0)
+
+
+def load_cached_embeddings(
+    metadata_path: Path, embeddings_path: Path
+) -> tuple[list[str], NDArray[np.float32]]:
+    """Read a cached embeddings dataset back as ``(source_filenames, vectors)``.
+
+    The I/O inverse of ``base_metadata_cells``: the ``source_filename`` column of
+    ``metadata.csv`` (in row order) and the row-aligned ``embeddings.npy``. The
+    row counts must match -- a mismatch means the two files drifted apart, which
+    would silently misalign every vector with its provenance, so it is a loud
+    error rather than a truncation. Reusable by the calibrate/evaluate drivers.
+    """
+    with metadata_path.open(encoding="utf-8", newline="") as f:
+        names = [row["source_filename"] for row in csv.DictReader(f)]
+    vectors: NDArray[np.float32] = np.load(embeddings_path).astype(np.float32)
+    if len(names) != vectors.shape[0]:
+        raise ValueError(
+            f"{metadata_path} has {len(names)} rows but {embeddings_path} has "
+            f"{vectors.shape[0]}; the embeddings cache is inconsistent"
+        )
+    return names, vectors
 
 
 def base_metadata_cells(
