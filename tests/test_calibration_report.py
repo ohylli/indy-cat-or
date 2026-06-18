@@ -116,6 +116,92 @@ def test_build_report_groups_persian_as_lookalike() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# render_report_html / write_report_html
+# --------------------------------------------------------------------------- #
+
+
+def _html_fixture(tmp_path: Path) -> tuple[str, Path, Path]:
+    """Render an HTML report over synthetic data; return (html, indy_dir, html_path).
+
+    Image files need not exist -- only ``src`` strings are generated -- so the dirs
+    are plain tmp_path subdirs.
+    """
+    indy_dir = tmp_path / "images" / "indy"
+    oxford_dir = tmp_path / "images" / "oxford"
+    html_path = tmp_path / "data" / "reports" / "r.html"
+    positives = [
+        cr.ScoredImage("indy_a.jpg", 0.8, "g0.jpg", None),
+        cr.ScoredImage("indy_b.jpg", 0.6, "g1.jpg", None),
+    ]
+    negatives = [
+        cr.ScoredImage("Persian_1.jpg", 0.5, "g0.jpg", "Persian"),
+        cr.ScoredImage("Abyssinian_1.jpg", 0.2, "g1.jpg", "Abyssinian"),
+    ]
+    document = cr.render_report_html(
+        "m.yaml",
+        ["g0.jpg", "g1.jpg"],
+        positives,
+        negatives,
+        "max",
+        html_path=html_path,
+        indy_image_dir=indy_dir,
+        oxford_image_dir=oxford_dir,
+    )
+    return document, indy_dir, html_path
+
+
+def test_render_report_html_has_sections_tables_and_risk_list(tmp_path: Path) -> None:
+    document, _, _ = _html_fixture(tmp_path)
+    assert document.startswith("<!DOCTYPE html>")
+    assert "<h2>Score distribution</h2>" in document
+    assert "<h2>Overlap</h2>" in document
+    assert "<h2>Per-breed negative scores</h2>" in document
+    assert "<h2>Gallery</h2>" in document
+    assert "<table>" in document
+    assert '<ol class="risks">' in document
+
+
+def test_render_report_html_image_alt_and_visible_caption(tmp_path: Path) -> None:
+    document, _, _ = _html_fixture(tmp_path)
+    # The highest negative shows both alt= and a visible figcaption of its name,
+    # plus its best-match gallery photo.
+    assert 'alt="Persian_1.jpg"' in document
+    assert "<figcaption>Persian_1.jpg</figcaption>" in document
+    assert 'alt="g0.jpg"' in document
+
+
+def test_render_report_html_src_is_relative_and_forward_slashed(tmp_path: Path) -> None:
+    document, _, _ = _html_fixture(tmp_path)
+    # An Oxford candidate resolves under the oxford dir, its best-match under indy;
+    # paths are relative (climb out of data/reports) and use forward slashes.
+    assert 'src="../../images/oxford/Persian_1.jpg"' in document
+    assert 'src="../../images/indy/g0.jpg"' in document
+    assert "\\" not in document
+
+
+def test_render_report_html_lists_every_gallery_photo(tmp_path: Path) -> None:
+    document, _, _ = _html_fixture(tmp_path)
+    assert 'src="../../images/indy/g0.jpg"' in document
+    assert 'src="../../images/indy/g1.jpg"' in document
+
+
+def test_write_report_html_roundtrips(tmp_path: Path) -> None:
+    out = tmp_path / "reports" / "r.html"
+    cr.write_report_html(
+        out,
+        "m.yaml",
+        ["g0.jpg"],
+        [cr.ScoredImage("indy_a.jpg", 0.8, "g0.jpg", None)],
+        [cr.ScoredImage("Persian_1.jpg", 0.5, "g0.jpg", "Persian")],
+        "max",
+        indy_image_dir=tmp_path / "images" / "indy",
+        oxford_image_dir=tmp_path / "images" / "oxford",
+    )
+    assert out.exists()
+    assert out.read_text(encoding="utf-8").startswith("<!DOCTYPE html>")
+
+
+# --------------------------------------------------------------------------- #
 # write_scores_csv
 # --------------------------------------------------------------------------- #
 

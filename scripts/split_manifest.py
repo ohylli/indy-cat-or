@@ -47,6 +47,16 @@ OXFORD_EMBEDDINGS = REPO_ROOT / "data" / "embeddings" / "oxford" / "embeddings.n
 INDY_MAPPING = REPO_ROOT / "images" / "indy" / "mapping.csv"
 SPLITS_DIR = REPO_ROOT / "data" / "splits"
 
+#: Source-image directories, keyed to the ``source_filename`` columns: Indy's
+#: ``metadata.csv`` names live directly in ``images/indy/`` and Oxford's under
+#: ``images/oxford-iiit-pet/images/``. The HTML report embeds these full images.
+INDY_IMAGE_DIR = REPO_ROOT / "images" / "indy"
+OXFORD_IMAGE_DIR = REPO_ROOT / "images" / "oxford-iiit-pet" / "images"
+
+#: Default output location for the optional HTML calibration report (gitignored,
+#: like ``SPLITS_DIR``).
+REPORTS_DIR = REPO_ROOT / "data" / "reports"
+
 #: Built-in seed so a zero-arg baseline run is bit-for-bit repeatable.
 DEFAULT_SEED = 20240601
 DEFAULT_GALLERY = 15

@@ -27,6 +27,11 @@ Usage::
     uv run python scripts/calibrate.py --aggregation mean-top3 \
         --scores-out data/splits/scores.csv
 
+    # also write an HTML report with embedded images (bare flag auto-names
+    # into data/reports/; or pass an explicit path)
+    uv run python scripts/calibrate.py --html
+    uv run python scripts/calibrate.py --html data/reports/run.html
+
     # fresh random seed (the drawn seed is recorded in the written manifest)
     uv run python scripts/calibrate.py --random-seed
 
@@ -46,6 +51,7 @@ from calibration_report import (
     build_report,
     score_role,
     select_vectors,
+    write_report_html,
     write_scores_csv,
 )
 from indycat.decision import AGGREGATIONS, Aggregation, Gallery
@@ -60,6 +66,7 @@ from split_manifest import (
     OXFORD_EMBEDDINGS,
     OXFORD_METADATA,
     PREFER_CHOICES,
+    REPORTS_DIR,
     SPLITS_DIR,
     STRATEGY_THREE_WAY,
     GenerationParams,
@@ -71,6 +78,9 @@ from split_manifest import (
     load_oxford_metadata,
     write_manifest,
 )
+
+#: Sentinel for a bare ``--html`` (no path given) -> auto-name into REPORTS_DIR.
+_HTML_AUTO = "<auto>"
 
 #: Generation flags; if any is explicitly set, --manifest (replay) is rejected.
 _GENERATION_FLAGS = (
@@ -160,6 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional CSV of per-image scores joined with provenance",
     )
+    parser.add_argument(
+        "--html",
+        nargs="?",
+        const=_HTML_AUTO,
+        default=None,
+        help="also write an HTML report with embedded images; bare flag auto-names "
+        "into data/reports/, or give an explicit path",
+    )
     return parser
 
 
@@ -197,6 +215,18 @@ def default_manifest_name(params: GenerationParams) -> str:
     )
 
 
+def default_report_name(params: GenerationParams, aggregation: Aggregation) -> str:
+    """A deterministic filename for an auto-saved HTML report.
+
+    Parallels :func:`default_manifest_name` but also encodes the ``aggregation``,
+    since that changes the report's scores.
+    """
+    return (
+        f"report-{params.strategy}-seed{params.seed}-g{params.gallery}"
+        f"-c{params.calibration}-t{params.test}-{aggregation}.html"
+    )
+
+
 def summarize(manifest: SplitManifest) -> str:
     """A textual, screen-reader-friendly summary of a manifest's roles."""
     lines = [
@@ -217,6 +247,7 @@ def run_calibration(
     label: str,
     aggregation: Aggregation,
     scores_out: Path | None,
+    html_out: Path | None,
 ) -> None:
     """Score the positives/negatives against the gallery and print the report.
 
@@ -246,6 +277,16 @@ def run_calibration(
     if scores_out is not None:
         write_scores_csv(scores_out, positives, negatives)
         print(f"\nPer-image scores written to {scores_out}")
+    if html_out is not None:
+        write_report_html(
+            html_out,
+            label,
+            manifest.indy_gallery,
+            positives,
+            negatives,
+            aggregation,
+        )
+        print(f"\nHTML report written to {html_out}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -285,11 +326,20 @@ def main(argv: list[str] | None = None) -> None:
             print(summarize(manifest))
 
         if not args.generate_only:
+            if args.html is None:
+                html_out = None
+            elif args.html == _HTML_AUTO:
+                html_out = REPORTS_DIR / default_report_name(
+                    manifest.params, args.aggregation
+                )
+            else:
+                html_out = Path(args.html)
             run_calibration(
                 manifest,
                 label,
                 args.aggregation,
                 Path(args.scores_out) if args.scores_out is not None else None,
+                html_out,
             )
     except SplitConfigError as err:
         raise SystemExit(str(err)) from err
