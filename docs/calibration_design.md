@@ -29,7 +29,7 @@ The threshold lives in the gap between them. The size and contents of any overla
 
 ### Metrics
 
-- **Primary: false-positive rate on look-alikes** — non-Indy cats wrongly scored as Indy, over all non-Indy cats, with the look-alikes (long-haired breeds) called out specifically.
+- **Primary: false-positive rate on look-alikes** — non-Indy cats wrongly scored as Indy, over all non-Indy cats, with the look-alikes (long-haired breeds) called out specifically. **Report this honestly:** under the breed-stratified split the look-alike *breeds* appear on both sides (image-disjoint, breed-overlapping — see §3), so this number measures FPR on *look-alike breeds that were also seen during calibration*. It is **not** the unseen-breed generalization test the handoff's "real exam" language implies — that role belongs to the future, fully held-out NFC slice (§7). The report (and later `evaluate.py`) labels the metric accordingly so it is never read as stronger than it is.
 - **Tracked alongside: recall on Indy** — to confirm that fewer false positives are not bought by missing Indy himself.
 - **Breakdown:** the report breaks negatives down **by breed group (look-alike vs. easy) and per individual breed**. Per-breed numbers show exactly which breeds drive the false-positive risk (and confirm or refute the "Maine Coon / Ragdoll / Birman are the hard ones" hypothesis), rather than hiding it inside an aggregate.
 
@@ -51,6 +51,7 @@ The manifest names a `strategy`:
 ### Generate dynamically, materialize the result
 
 - **Generation is dynamic** — `seed` + counts/percentages + stratify-by-breed logic decide membership. Breed balancing lives in the *code*, not in stored config.
+- **Counts are validated against what is actually embedded, and over-asking fails loudly.** Requested role counts are checked against the rows present in `metadata.csv` (not against an assumed 35 Indy / full Oxford), and an impossible request is a hard error, never a silently-truncated split. This matters because the zero-arg baseline (`15 + 10 + 10`) consumes *every* Indy photo with no margin: if a photo ever fails to embed or is dropped, the default must refuse to run rather than quietly produce a smaller split — consistent with the project's no-silently-wrong-numbers stance.
 - **The artifact is materialized** — a generated run writes out the *resolved* filename lists (by `source_filename`) for both Indy and Oxford, test and setup. The generation parameters are also recorded in the header for audit, but the body holds the actual frozen membership.
 
 So the seed is *how a split is created*; the materialized list is *what is saved*. Loading a manifest uses the frozen lists **verbatim — it never recomputes.**
@@ -75,7 +76,7 @@ The manifest references only images that are actually embedded (rows in `metadat
 
 ### Indy vs. Oxford selection
 
-- **Indy** is always materialized (35 photos, meaningful names). The automated selector is random-but-seeded; an optional `prefer` knob can bias the gallery toward `head_visible` / `tail_visible` photos (text fields in `mapping.csv`), since those carry the most identifying information. A **manual** path — hand-edit the YAML, optionally aided by the existing `data_review` app surfacing `mapping.csv` attributes — produces a manifest in the same format. Hand-picked-vs-random gallery is itself a measurable experiment.
+- **Indy** is always materialized (35 photos, meaningful names). The automated selector is random-but-seeded; an optional `prefer` knob can bias the gallery toward `head_visible` / `tail_visible` photos (text fields in `mapping.csv`), since those carry the most identifying information. **`prefer` is off for the baseline.** Because the test split is drawn first (§"Test split first"), skimming the head/tail-visible photos into the gallery leaves the *calibration positives* with the weaker photos — distorting the very positive distribution V0 exists to measure. So biased-gallery is strictly a later, labelled experiment (§7); the default run keeps selection unbiased. A **manual** path — hand-edit the YAML, optionally aided by the existing `data_review` app surfacing `mapping.csv` attributes — produces a manifest in the same format. Hand-picked-vs-random gallery is itself a measurable experiment.
 - **Oxford** is selected automatically, stratified by breed so each role gets a representative breed mix and the look-alike tail is never lopsided. Manual Oxford picking is deferred — Oxford's breed labels are trustworthy, so "hard look-alikes" = the long-haired breeds, fully automatable; manual selection only becomes relevant for a future community NFC set with unreliable labels.
 
 ## 4. The calibration tool — outside view
