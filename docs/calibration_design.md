@@ -1,0 +1,165 @@
+# Decide stage & calibration — design
+
+A design document for the **decide** stage of the pipeline (`image → detect → crop → embed → decide`) and, in particular, for the **calibration** tool that sets its threshold. It captures the decisions made in a design session and is the basis for implementation in later sessions.
+
+It is intentionally **high-level — mostly "what", not "how"**. It records the methodology and the shape of the tools, not code. Several points are explicit candidates for refinement once real results come in; those are collected at the end. The authoritative project brief remains [`../project_handoff.md`](../project_handoff.md); this document elaborates its "Decision step" and "Evaluation" sections without replacing them.
+
+## 1. The decision (the live path)
+
+The live decision is unchanged from the handoff: **verification by similarity threshold against the Indy gallery only.** A new image is detected, cropped, and embedded; its embedding is compared to the Indy gallery embeddings; the best aggregated similarity is compared to a fixed threshold. Above means Indy, below means not. The negatives never participate in the live decision — their entire role is calibration and evaluation.
+
+### Scoring function
+
+- **Normalize at decide time.** Stored gallery vectors are raw (un-normalized) by design — that keeps the linear-probe escalation path open. The decide stage L2-normalizes both the query embedding and the gallery vectors, so cosine similarity is a dot product.
+- **Aggregation: `max` is the default.** The score of a query against the gallery is the single best (maximum) cosine similarity to any gallery vector. This suits Indy's pose variety and the fact that his identity is concentrated in head and tail: a query showing one aspect should match the gallery photos that share it, not be diluted by the ones that don't. `mean-top3` (mean of the top three matches) is the measured alternative, compared during calibration — not chosen up front.
+- **Multiple crops in one photo.** When the detector returns more than one cat, the photo's score is the `max` over its crops ("is Indy in this photo" = "is any crop Indy"). This is a *live-decode* concern only: the stored galleries hold one vector per image, so calibration operates per stored embedding.
+
+The decide output is a textual result — score, threshold, verdict, and **which gallery photo was the best match** (plus that photo's `position`/`view` from `mapping.csv`). This makes a verdict inspectable without looking at the image, consistent with the screen-reader-first principle used by the detector.
+
+## 2. Calibration philosophy
+
+**Calibration is a measurement tool, not a number-picker.** The threshold is a judgement call that cannot be made well before the two score distributions — Indy positives vs. non-Indy negatives — have actually been seen. So the early job of calibration is to *show where the distributions separate*, not to emit a cutoff. Automated threshold-picking is added deliberately late, once the shape of the data (and the size of the overlap) is understood, because even *which* picking policy is appropriate depends on what the distributions look like and on the project's false-positive-first priority.
+
+### What calibration measures
+
+- **Negative scores** — every calibration-split Oxford cat scored against the Indy gallery. These should cluster low; the long-haired look-alike breeds form the high tail that determines where the threshold must sit.
+- **Positive scores** — held-back Indy photos (the `calibration` role, **disjoint from the gallery**, so there is no self-match) scored against the gallery. These should cluster high.
+
+The threshold lives in the gap between them. The size and contents of any overlap are the primary thing calibration exists to reveal.
+
+### Metrics
+
+- **Primary: false-positive rate on look-alikes** — non-Indy cats wrongly scored as Indy, over all non-Indy cats, with the look-alikes (long-haired breeds) called out specifically.
+- **Tracked alongside: recall on Indy** — to confirm that fewer false positives are not bought by missing Indy himself.
+- **Breakdown:** the report breaks negatives down **by breed group (look-alike vs. easy) and per individual breed**. Per-breed numbers show exactly which breeds drive the false-positive risk (and confirm or refute the "Maine Coon / Ragdoll / Birman are the hard ones" hypothesis), rather than hiding it inside an aggregate.
+
+## 3. The split manifest
+
+A **manifest** defines one reproducible experiment: which images play which role. It is the unit of an experiment.
+
+### Single file (Option 1)
+
+Each experiment is a single self-contained YAML listing all roles. The risk of one-file manifests — that regenerating for a new experiment silently moves the test set — is handled **in the generator**, not by convention: see "test split first" below.
+
+### Strategy
+
+The manifest names a `strategy`:
+
+- **`three_way`** (now) — the setup pool is carved into `gallery` and `calibration`.
+- **`leave_one_out`** (later) — there is no fixed `calibration` role; the calibrate step rotates over a single pool, scoring each Indy photo against a gallery built from the others. This is why strategy lives in the manifest rather than being hard-coded in the tool.
+
+### Generate dynamically, materialize the result
+
+- **Generation is dynamic** — `seed` + counts/percentages + stratify-by-breed logic decide membership. Breed balancing lives in the *code*, not in stored config.
+- **The artifact is materialized** — a generated run writes out the *resolved* filename lists (by `source_filename`) for both Indy and Oxford, test and setup. The generation parameters are also recorded in the header for audit, but the body holds the actual frozen membership.
+
+So the seed is *how a split is created*; the materialized list is *what is saved*. Loading a manifest uses the frozen lists **verbatim — it never recomputes.**
+
+Pure-dynamic re-derivation (seed + percentages only, no stored list) is deliberately **not** used: it makes reproducibility hostage to `metadata.csv` staying byte-identical, so a re-embed or a change in the Oxford miss count would silently yield a different split — including a drifting test exam. Materializing the result is cheap insurance against exactly the "silently-wrong numbers" failure the project guards against, and it costs nothing in usability because the dynamic generation path is still the entry point. It also makes splits **diffable** (did the test set move? — a set-intersection check) and **self-contained** (no hidden dependency on current `metadata.csv`).
+
+### Test split first
+
+The generator computes the **test set first**, as a pure function of `(image set, seed, test-count)` only — never touching gallery/calibration counts. This gives the invariant that keeps strategy/size comparisons valid:
+
+> Hold `--seed` and `--test` fixed and vary `--gallery`/`--calibration` freely → identical exam. Change `--seed` → a new exam, drawn knowingly.
+
+When a *guaranteed* fixed exam is wanted (e.g. across many experiments), the written manifest is reused directly rather than regenerated.
+
+### What the manifest contains
+
+- **Header / provenance:** strategy, seed, generation parameters (counts/percentages, breed filter), and a **per-breed count summary per role** — so the breed balance is inspectable at a glance without reading the full lists (screen-reader-friendly).
+- **Body:** the materialized lists. Indy — `gallery` / `calibration` / `test` (small, meaningful names, hand-pickable). Oxford — `test` / `setup`, referenced by `source_filename`.
+- **Not in the manifest:** the scoring aggregation (`max` vs `mean-top3`) and the threshold. Those describe the calibration *result*, not the data split, so the same manifest can be re-run under different aggregations. (See §5.)
+
+The manifest references only images that are actually embedded (rows in `metadata.csv`), not the catalog — Oxford's no-cat misses have no vector to score. Disjointness of the role sets is **asserted mechanically at load**; a non-empty intersection is a loud failure.
+
+### Indy vs. Oxford selection
+
+- **Indy** is always materialized (35 photos, meaningful names). The automated selector is random-but-seeded; an optional `prefer` knob can bias the gallery toward `head_visible` / `tail_visible` photos (text fields in `mapping.csv`), since those carry the most identifying information. A **manual** path — hand-edit the YAML, optionally aided by the existing `data_review` app surfacing `mapping.csv` attributes — produces a manifest in the same format. Hand-picked-vs-random gallery is itself a measurable experiment.
+- **Oxford** is selected automatically, stratified by breed so each role gets a representative breed mix and the look-alike tail is never lopsided. Manual Oxford picking is deferred — Oxford's breed labels are trustworthy, so "hard look-alikes" = the long-haired breeds, fully automatable; manual selection only becomes relevant for a future community NFC set with unreliable labels.
+
+## 4. The calibration tool — outside view
+
+Generation is **folded into the calibrator**: one command, not a two-step dance.
+
+### Invocation
+
+```
+# zero-arg: built-in defaults + built-in seed -> identical every time
+calibrate
+
+# specify the split
+calibrate --gallery 15 --calibration 10 --test 10 --seed 42
+
+# fresh random seed (the drawn seed is recorded in the written manifest)
+calibrate --random-seed
+
+# replay an exact prior split
+calibrate --manifest splits/run-<...>.yaml
+```
+
+- `--manifest` and the generation flags are **mutually exclusive**: a manifest means "use exactly this, ignore generation."
+- A **generated** run writes its resolved manifest to disk (path printed); a **loaded** run does not rewrite.
+- `--aggregation max | mean-top3` selects the scoring choice (default `max`).
+- `--scores-out <csv>` optionally writes per-image scores for inspection.
+- `--random-seed` still **records the seed it drew** into the written manifest, so even an exploratory run is reproducible afterward.
+
+### The default run
+
+The zero-arg run is the **stage-1 baseline**: `gallery 15 / calibration 10 / test 10` Indy; **all** Oxford breeds at 70/30 stratified by breed; `aggregation = max`; built-in seed. So `calibrate` with no arguments means "the baseline experiment," bit-for-bit repeatable.
+
+### Reproducibility, precisely
+
+The seed reproduces *intent*; the materialized manifest reproduces *exact images*. These diverge if `metadata.csv` changes underneath a seed-only run. For anything that must stay locked over the life of the project, **the written manifest is the source of truth**; the seed is the day-to-day convenience.
+
+### Output (textual, screen-reader-first)
+
+A textual report to stdout — illustrative shape:
+
+```
+Calibration: <manifest>   (aggregation=max)
+  Gallery:    15 Indy photos
+  Positives:  10 Indy photos (calibration)
+  Negatives:  N Oxford cats, 12 breeds
+
+Score distribution (cosine to best gallery match):
+                n      mean   min    p50    p95    max
+  Indy (pos)    ...
+  Oxford (neg)  ...
+
+  Lowest positive ...  vs  highest negative ...  ->  OVERLAP ...
+
+FPR by breed group / breed:   look-alike vs easy, then per breed
+Highest-scoring negatives (false-positive risks):  score, name, breed
+Lowest-scoring positives (recognition risks):      score, name
+```
+
+The per-image `--scores-out` CSV joins each score with `metadata.csv` provenance (filename, breed, Indy position/view) so the worst false-positive risks and hardest-to-recognize positives are directly inspectable.
+
+## 5. Incremental staging
+
+Built in stages, each validating before adding features:
+
+- **V0 — distributions only.** Builds the core scoring (`src/indycat/decision.py`: normalize + aggregate against gallery) and the calibrate driver that emits the report above. **No threshold is chosen.** Answers the first question worth answering: *do the distributions separate at all?* If they do not, that is learned immediately, before any threshold machinery is built on a foundation that does not hold.
+- **V1 — trade-off curve.** A threshold sweep: a table of `cutoff → FPR (overall, look-alike, per breed) , recall-on-Indy`. The trade-off becomes visible; still human-read.
+- **V2 — automated pick by explicit policy.** Given the now-understood shape, a `--policy` flag (e.g. target-FPR / Youden's J / equal-error) emits a chosen threshold. This is where the judgement is encoded — deliberately last.
+- **V3 — freeze it.** Write the calibration artifact (a small file: threshold + aggregation + the curve) that the decide stage consumes, and add aggregation comparison (`max` vs `mean-top3`) in one run.
+
+The scoring code lives in the core (`decision.py`); calibrate is a thin driver over it. Building V0 therefore also delivers and validates the core decide API.
+
+## 6. Boundaries & discipline
+
+- **Calibrate never touches `test`.** A separate, later `evaluate.py` reads the `test` role plus a frozen calibration artifact and reports the honest numbers at the frozen threshold. Calibration uses only `gallery` and `calibration` roles.
+- **Split discipline** (from the handoff, restated): disjoint at the *image* level (breed-level overlap is fine and desirable); the test exam fixed up front and never used during setup; the test exam must include the look-alike slice.
+- **Core vs. driver:** the scoring/decision logic is UI-agnostic core in `src/indycat/`; the calibrate and (future) evaluate tools and the split generator live in `scripts/`, with the generator factored as a reusable unit (not tangled into calibrate's measurement job) so a standalone generate command or `evaluate.py` can reuse it.
+
+## 7. Open / to revisit
+
+Treated as adjustable, decided by measured results rather than assumption:
+
+- **Aggregation winner** — `max` vs `mean-top3`, chosen from measured separation.
+- **Threshold-picking policy** — target-FPR vs balanced vs equal-error, chosen once the distribution shape is known (V2).
+- **Leave-one-out strategy** — second strategy to add after the three-way baseline, for comparison at fixed test exam.
+- **Separate test seed** — a fully decoupled "exam can't move even if `--seed` changes" scheme; deferred, since materializing the manifest already locks the exam. Build only if the single-seed invariant proves error-prone.
+- **Gallery selection** — random vs `head_visible`/`tail_visible`-biased vs hand-picked, as a measurable comparison.
+- **Look-alike slice source** — currently held-out Oxford long-haired breeds; to be supplemented by a dedicated (label-caveated) Norwegian Forest Cat / look-alike set in a later data stage.
