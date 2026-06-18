@@ -4,6 +4,14 @@ A design document for the **decide** stage of the pipeline (`image → detect �
 
 It is intentionally **high-level — mostly "what", not "how"**. It records the methodology and the shape of the tools, not code. Several points are explicit candidates for refinement once real results come in; those are collected at the end. The authoritative project brief remains [`../project_handoff.md`](../project_handoff.md); this document elaborates its "Decision step" and "Evaluation" sections without replacing them.
 
+## Status
+
+What exists so far against this design:
+
+- **Split manifest generator — done.** `scripts/split_manifest.py` is the reusable unit (§3, §6): it loads the embedded Indy/Oxford `metadata.csv` (joining Indy to `mapping.csv` for the `prefer` flags), generates a `three_way` split, and writes/loads a YAML manifest. The three guarantees are implemented and tested: **test split drawn first** (invariant to gallery/calibration counts), **counts validated against rows actually embedded** (over-ask is a hard error), and **materialized lists used verbatim at load** (disjointness, format version, and breed-summary consistency asserted loudly). Oxford selection is breed-stratified; the `prefer` knob is plumbed but off for the baseline.
+- **CLI — partial.** `scripts/calibrate.py` is the entry point (generation folded in, per §4): generation flags, a `--seed`/`--random-seed` group, `--manifest` replay (mutually exclusive with generation flags), and `--generate-only`. Manifests are written under `data/splits/` (gitignored). A normal run currently generates + saves the manifest and then reports that calibration scoring is not yet implemented — that notice marks where the V0 scoring step (below) plugs in.
+- **Not yet started:** the scoring core (`src/indycat/decision.py`: normalize + aggregate against the gallery), the textual calibration report, and everything in §5's V0–V3 (distributions, trade-off curve, automated pick, freeze) and the separate `evaluate.py`. `leave_one_out` is unimplemented (the `strategy` string is stored; only `three_way` is generated).
+
 ## 1. The decision (the live path)
 
 The live decision is unchanged from the handoff: **verification by similarity threshold against the Indy gallery only.** A new image is detected, cropped, and embedded; its embedding is compared to the Indy gallery embeddings; the best aggregated similarity is compared to a fixed threshold. Above means Indy, below means not. The negatives never participate in the live decision — their entire role is calibration and evaluation.
