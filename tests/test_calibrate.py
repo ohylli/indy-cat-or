@@ -87,6 +87,17 @@ def test_default_run_writes_manifest_and_prints_report(
     printed = capsys.readouterr().out
     assert "Score distribution" in printed
     assert "Negatives by group" in printed
+    assert "Threshold sweep" in printed  # V1 trade-off curve
+
+
+def test_sweep_step_controls_grid(
+    fake_data: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "m.yaml"
+    calibrate.main(["--out", str(out), "--sweep-step", "0.1"])
+    printed = capsys.readouterr().out
+    assert "Threshold sweep" in printed
+    assert "Per-breed FPR by cutoff" in printed
 
 
 def test_scores_out_writes_csv(

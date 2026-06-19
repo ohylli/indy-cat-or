@@ -116,6 +116,76 @@ def test_build_report_groups_persian_as_lookalike() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# threshold sweep (V1)
+# --------------------------------------------------------------------------- #
+
+
+def test_sweep_thresholds_are_round_and_bracket_the_range() -> None:
+    positives = [cr.ScoredImage("p", 0.83, "g0", None)]
+    negatives = [cr.ScoredImage("n", 0.12, "g0", "Persian")]
+    thresholds = cr.sweep_thresholds(positives, negatives, 0.05)
+    # Round multiples of the step, spanning below the min (0.12 -> 0.10) to above
+    # the max (0.83 -> 0.85), so the grid brackets the full trade-off.
+    assert thresholds[0] == pytest.approx(0.10)
+    assert thresholds[-1] == pytest.approx(0.85)
+    assert all(round(t / 0.05) == pytest.approx(t / 0.05) for t in thresholds)
+
+
+def test_sweep_thresholds_empty_input_is_empty() -> None:
+    assert cr.sweep_thresholds([], [], 0.05) == []
+
+
+def test_sweep_thresholds_rejects_nonpositive_step() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        cr.sweep_thresholds([cr.ScoredImage("p", 0.5, "g0", None)], [], 0.0)
+
+
+def test_build_sweep_fpr_and_recall_with_lookalike_split() -> None:
+    positives = [
+        cr.ScoredImage("p0", 0.8, "g0", None),
+        cr.ScoredImage("p1", 0.4, "g0", None),
+    ]
+    negatives = [
+        cr.ScoredImage("Persian_1.jpg", 0.6, "g0", "Persian"),  # look-alike
+        cr.ScoredImage("Persian_2.jpg", 0.3, "g0", "Persian"),  # look-alike
+        cr.ScoredImage("Abyssinian_1.jpg", 0.5, "g0", "Abyssinian"),  # easy
+    ]
+    [row] = cr.build_sweep(positives, negatives, [0.5])
+    assert row.cutoff == 0.5
+    assert row.fpr_overall == pytest.approx(2 / 3)  # Persian_1 + Abyssinian_1 >= 0.5
+    assert row.fpr_lookalike == pytest.approx(0.5)  # 1 of 2 Persians
+    assert row.fpr_easy == pytest.approx(1.0)  # the one Abyssinian
+    assert row.recall == pytest.approx(0.5)  # 1 of 2 positives (>= uses 0.8 only)
+
+
+def test_build_sweep_empty_group_is_nan() -> None:
+    # No look-alike negatives -> look-alike FPR is NaN (renders as a dash).
+    negatives = [cr.ScoredImage("Abyssinian_1.jpg", 0.5, "g0", "Abyssinian")]
+    [row] = cr.build_sweep([cr.ScoredImage("p", 0.9, "g0", None)], negatives, [0.5])
+    assert math.isnan(row.fpr_lookalike)
+
+
+def test_build_breed_sweep_is_sorted_worst_first() -> None:
+    negatives = [
+        cr.ScoredImage("Abyssinian_1.jpg", 0.3, "g0", "Abyssinian"),
+        cr.ScoredImage("Persian_1.jpg", 0.7, "g0", "Persian"),  # highest max
+    ]
+    breeds, fpr_by_breed = cr.build_breed_sweep(negatives, [0.5])
+    assert breeds == ["Persian", "Abyssinian"]  # Persian leads (max 0.7 > 0.3)
+    assert fpr_by_breed["Persian"] == [pytest.approx(1.0)]
+    assert fpr_by_breed["Abyssinian"] == [pytest.approx(0.0)]
+
+
+def test_build_report_includes_sweep_sections() -> None:
+    positives = [cr.ScoredImage("p0", 0.8, "g0", None)]
+    negatives = [cr.ScoredImage("Persian_1.jpg", 0.5, "g0", "Persian")]
+    report = cr.build_report("m.yaml", 5, positives, negatives, "max")
+    assert "Threshold sweep" in report
+    assert "Per-breed FPR by cutoff" in report
+    assert "recall" in report
+
+
+# --------------------------------------------------------------------------- #
 # render_report_html / write_report_html
 # --------------------------------------------------------------------------- #
 
@@ -156,6 +226,8 @@ def test_render_report_html_has_sections_tables_and_risk_list(tmp_path: Path) ->
     assert "<h2>Score distribution</h2>" in document
     assert "<h2>Overlap</h2>" in document
     assert "<h2>Per-breed negative scores</h2>" in document
+    assert "<h2>Threshold sweep</h2>" in document
+    assert "<h2>Per-breed FPR by cutoff</h2>" in document
     assert "<h2>Gallery</h2>" in document
     assert "<table>" in document
     assert '<ol class="risks">' in document

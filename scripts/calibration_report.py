@@ -1,17 +1,19 @@
-"""Measure and report the calibration score distributions (V0).
+"""Measure and report the calibration score distributions and trade-off (V0+V1).
 
-The V0 slice of ``docs/calibration_design.md`` Sec. 5: *distributions only, no
-threshold chosen.* This module scores the held-back Indy positives and the
-Oxford negatives against the gallery (via ``indycat.decision``) and renders the
-screen-reader-first textual report from Sec. 4 -- distribution tables, the
-positive/negative overlap, a look-alike-vs-easy breakdown, per-breed negative
-scores, and the worst false-positive / hardest-positive rows.
+The V0+V1 slices of ``docs/calibration_design.md`` Sec. 5. This module scores the
+held-back Indy positives and the Oxford negatives against the gallery (via
+``indycat.decision``) and renders the screen-reader-first textual report from
+Sec. 4: the V0 distribution tables, the positive/negative overlap, a
+look-alike-vs-easy breakdown, per-breed negative scores, and the worst
+false-positive / hardest-positive rows -- plus the **V1 threshold sweep**, a
+trade-off curve of ``cutoff -> FPR (overall / look-alike / easy) , recall-on-Indy``
+with a separate per-breed FPR table.
 
-It deliberately stops short of FPR-by-threshold and any cutoff: those need a
-threshold, which is V1/V2. Kept separate from ``calibrate.py`` so the CLI stays a
-thin driver and the measurement/report is unit-testable. ``test`` is never
-touched here -- only ``gallery`` (the references), ``calibration`` (positives),
-and the Oxford ``setup`` (negatives) roles take part.
+The sweep deliberately picks **no cutoff** -- it only makes the trade-off visible
+(choosing a threshold by policy is V2). Kept separate from ``calibrate.py`` so the
+CLI stays a thin driver and the measurement/report is unit-testable. ``test`` is
+never touched here -- only ``gallery`` (the references), ``calibration``
+(positives), and the Oxford ``setup`` (negatives) roles take part.
 """
 
 from __future__ import annotations
@@ -58,6 +60,23 @@ class Stats:
     p50: float
     p95: float
     max: float
+
+
+@dataclass(frozen=True)
+class SweepRow:
+    """One row of the threshold sweep: the trade-off at a single cutoff.
+
+    A query is called *Indy* when its score ``>= cutoff`` (the ``>=`` convention
+    matches the overlap counts). ``fpr_*`` are false-positive rates over the
+    respective negative groups; ``recall`` is the fraction of positives kept.
+    Any rate is NaN when its group is empty.
+    """
+
+    cutoff: float
+    fpr_overall: float
+    fpr_lookalike: float
+    fpr_easy: float
+    recall: float
 
 
 def build_name_to_vector(
@@ -121,6 +140,77 @@ def summarize(scores: list[float]) -> Stats:
         p95=float(np.percentile(arr, 95)),
         max=float(arr.max()),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Threshold sweep (V1: the trade-off curve, no cutoff is chosen)
+# --------------------------------------------------------------------------- #
+
+
+def sweep_thresholds(
+    positives: list[ScoredImage], negatives: list[ScoredImage], step: float
+) -> list[float]:
+    """A round, data-ranged grid of cutoffs spanning the observed scores.
+
+    Cutoffs are multiples of ``step`` from just below the minimum to just above
+    the maximum of *all* scores (positives and negatives together), so the grid
+    brackets the full trade-off: at the low end almost everything clears the bar
+    (FPR ~= 1, recall ~= 1); at the high end almost nothing does. Returns an
+    empty list when there is nothing to score.
+    """
+    if step <= 0:
+        raise ValueError(f"sweep step must be positive, got {step}")
+    scores = [s.score for s in positives] + [s.score for s in negatives]
+    if not scores:
+        return []
+    lo = math.floor(min(scores) / step)
+    hi = math.ceil(max(scores) / step)
+    return [round(k * step, 10) for k in range(lo, hi + 1)]
+
+
+def _rate(scores: list[float], cutoff: float) -> float:
+    """Fraction of ``scores`` at or above ``cutoff``; NaN for an empty group."""
+    if not scores:
+        return float("nan")
+    return sum(1 for s in scores if s >= cutoff) / len(scores)
+
+
+def build_sweep(
+    positives: list[ScoredImage],
+    negatives: list[ScoredImage],
+    thresholds: list[float],
+) -> list[SweepRow]:
+    """The main trade-off: FPR (overall / look-alike / easy) and recall per cutoff."""
+    pos = [s.score for s in positives]
+    neg_all = [s.score for s in negatives]
+    neg_look = [s.score for s in negatives if s.breed in LOOKALIKE_BREEDS]
+    neg_easy = [s.score for s in negatives if s.breed not in LOOKALIKE_BREEDS]
+    return [
+        SweepRow(
+            cutoff=t,
+            fpr_overall=_rate(neg_all, t),
+            fpr_lookalike=_rate(neg_look, t),
+            fpr_easy=_rate(neg_easy, t),
+            recall=_rate(pos, t),
+        )
+        for t in thresholds
+    ]
+
+
+def build_breed_sweep(
+    negatives: list[ScoredImage], thresholds: list[float]
+) -> tuple[list[str], dict[str, list[float]]]:
+    """Per-breed FPR at each cutoff; breeds sorted worst-first (by max score desc).
+
+    Returns ``(breeds, fpr_by_breed)`` where ``fpr_by_breed[breed]`` is the list
+    of FPRs aligned to ``thresholds`` -- the same row order the text/HTML tables use.
+    """
+    by_breed: dict[str, list[float]] = {}
+    for s in negatives:
+        by_breed.setdefault(s.breed or "(unknown)", []).append(s.score)
+    breeds = sorted(by_breed, key=lambda b: max(by_breed[b]), reverse=True)
+    fpr_by_breed = {b: [_rate(by_breed[b], t) for t in thresholds] for b in breeds}
+    return breeds, fpr_by_breed
 
 
 # --------------------------------------------------------------------------- #
@@ -219,6 +309,44 @@ def _per_breed_section(negatives: list[ScoredImage]) -> list[str]:
     return lines
 
 
+def _sweep_section(
+    positives: list[ScoredImage],
+    negatives: list[ScoredImage],
+    thresholds: list[float],
+) -> list[str]:
+    rows = build_sweep(positives, negatives, thresholds)
+    lines = [
+        "",
+        "Threshold sweep (a query is Indy when score >= cutoff; no cutoff is "
+        "chosen here):",
+        f"  {'cutoff':>6}  {'FPR(all)':>8}  {'FPR(look)':>9}  {'FPR(easy)':>9}  "
+        f"{'recall':>6}",
+    ]
+    for r in rows:
+        lines.append(
+            f"  {r.cutoff:>6.2f}  {_fmt(r.fpr_overall):>8}  "
+            f"{_fmt(r.fpr_lookalike):>9}  {_fmt(r.fpr_easy):>9}  {_fmt(r.recall):>6}"
+        )
+    return lines
+
+
+def _per_breed_sweep_section(
+    negatives: list[ScoredImage], thresholds: list[float]
+) -> list[str]:
+    breeds, fpr_by_breed = build_breed_sweep(negatives, thresholds)
+    width = max((len(b) for b in breeds), default=5)
+    header_cells = "  ".join(f"{t:>5.2f}" for t in thresholds)
+    lines = [
+        "",
+        "Per-breed FPR by cutoff (breeds sorted worst-first):",
+        f"  {'breed':<{width}}  {header_cells}",
+    ]
+    for breed in breeds:
+        cells = "  ".join(f"{_fmt(f):>5}" for f in fpr_by_breed[breed])
+        lines.append(f"  {breed:<{width}}  {cells}")
+    return lines
+
+
 def select_risk_rows(
     positives: list[ScoredImage], negatives: list[ScoredImage]
 ) -> tuple[list[ScoredImage], list[ScoredImage]]:
@@ -254,8 +382,9 @@ def build_report(
     positives: list[ScoredImage],
     negatives: list[ScoredImage],
     aggregation: Aggregation,
+    sweep_step: float = 0.05,
 ) -> str:
-    """Render the full V0 textual calibration report."""
+    """Render the full textual calibration report (V0 distributions + V1 sweep)."""
     breeds = len({s.breed for s in negatives})
     header = [
         f"Calibration: {label}   (aggregation={aggregation})",
@@ -264,11 +393,14 @@ def build_report(
         f"  Negatives:  {len(negatives)} Oxford cats, {breeds} breeds",
         "",
     ]
+    thresholds = sweep_thresholds(positives, negatives, sweep_step)
     sections = [
         *_distribution_section(positives, negatives, aggregation),
         *_overlap_section(positives, negatives),
         *_group_section(negatives),
         *_per_breed_section(negatives),
+        *_sweep_section(positives, negatives, thresholds),
+        *_per_breed_sweep_section(negatives, thresholds),
         *_risk_sections(positives, negatives),
     ]
     return "\n".join([*header, *sections])
@@ -388,6 +520,45 @@ def _html_per_breed(negatives: list[ScoredImage]) -> str:
     )
 
 
+def _html_sweep(
+    positives: list[ScoredImage],
+    negatives: list[ScoredImage],
+    thresholds: list[float],
+) -> str:
+    cols = ("FPR (all)", "FPR (look-alike)", "FPR (easy)", "recall (Indy)")
+    head = "".join(f'<th scope="col">{html.escape(c)}</th>' for c in cols)
+    body = []
+    for r in build_sweep(positives, negatives, thresholds):
+        cells = "".join(
+            f"<td>{_fmt_html(v)}</td>"
+            for v in (r.fpr_overall, r.fpr_lookalike, r.fpr_easy, r.recall)
+        )
+        body.append(f'<tr><th scope="row">{r.cutoff:.2f}</th>{cells}</tr>')
+    return (
+        '<table><thead><tr><th scope="col">cutoff</th>'
+        + head
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table>"
+    )
+
+
+def _html_breed_sweep(negatives: list[ScoredImage], thresholds: list[float]) -> str:
+    breeds, fpr_by_breed = build_breed_sweep(negatives, thresholds)
+    head = "".join(f'<th scope="col">{t:.2f}</th>' for t in thresholds)
+    body = []
+    for breed in breeds:
+        cells = "".join(f"<td>{_fmt_html(f)}</td>" for f in fpr_by_breed[breed])
+        body.append(f'<tr><th scope="row">{html.escape(breed)}</th>{cells}</tr>')
+    return (
+        '<table><thead><tr><th scope="col">breed</th>'
+        + head
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table>"
+    )
+
+
 def _html_risk_list(
     rows: list[ScoredImage],
     candidate_dir: Path,
@@ -421,18 +592,21 @@ def render_report_html(
     aggregation: Aggregation,
     *,
     html_path: Path,
+    sweep_step: float = 0.05,
     indy_image_dir: Path = INDY_IMAGE_DIR,
     oxford_image_dir: Path = OXFORD_IMAGE_DIR,
 ) -> str:
-    """Render the V0 calibration report as a self-contained semantic HTML document.
+    """Render the calibration report as a self-contained semantic HTML document.
 
-    Mirrors :func:`build_report` section-for-section, but embeds the actual cat
-    photos the risk lists refer to (each candidate beside the gallery photo it best
-    matched) and lists the whole gallery. Image ``src`` paths are relative to
-    ``html_path`` so the file is portable; the filename is each image's ``alt`` text
-    *and* its visible caption (screen-reader-first).
+    Mirrors :func:`build_report` section-for-section (V0 distributions + the V1
+    threshold sweep), and additionally embeds the actual cat photos the risk lists
+    refer to (each candidate beside the gallery photo it best matched) and lists
+    the whole gallery. Image ``src`` paths are relative to ``html_path`` so the
+    file is portable; the filename is each image's ``alt`` text *and* its visible
+    caption (screen-reader-first).
     """
     html_dir = html_path.parent
+    thresholds = sweep_thresholds(positives, negatives, sweep_step)
     pos_stats = summarize([s.score for s in positives])
     neg_stats = summarize([s.score for s in negatives])
     look = [s for s in negatives if s.breed in LOOKALIKE_BREEDS]
@@ -479,6 +653,13 @@ def render_report_html(
         "<h2>Per-breed negative scores</h2>",
         "<p>Sorted by max descending.</p>",
         _html_per_breed(negatives),
+        "<h2>Threshold sweep</h2>",
+        "<p>A query is Indy when its score is at or above the cutoff. No cutoff "
+        "is chosen here -- this only shows the trade-off.</p>",
+        _html_sweep(positives, negatives, thresholds),
+        "<h2>Per-breed FPR by cutoff</h2>",
+        "<p>Breeds sorted worst-first (highest max negative score).</p>",
+        _html_breed_sweep(negatives, thresholds),
         f"<h2>Highest-scoring negatives (false-positive risks, top {_RISK_ROWS})</h2>",
         _html_risk_list(worst_neg, oxford_image_dir, html_dir, show_breed=True),
         f"<h2>Lowest-scoring positives (recognition risks, bottom {_RISK_ROWS})</h2>",
@@ -500,6 +681,7 @@ def write_report_html(
     negatives: list[ScoredImage],
     aggregation: Aggregation,
     *,
+    sweep_step: float = 0.05,
     indy_image_dir: Path = INDY_IMAGE_DIR,
     oxford_image_dir: Path = OXFORD_IMAGE_DIR,
 ) -> None:
@@ -512,6 +694,7 @@ def write_report_html(
         negatives,
         aggregation,
         html_path=path,
+        sweep_step=sweep_step,
         indy_image_dir=indy_image_dir,
         oxford_image_dir=oxford_image_dir,
     )

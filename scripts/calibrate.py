@@ -1,11 +1,12 @@
-"""Calibrate the decide stage: split, score, and report the distributions (V0).
+"""Calibrate the decide stage: split, score, report distributions + sweep (V0+V1).
 
-This is the V0 slice of ``docs/calibration_design.md`` Sec. 5 -- *distributions
-only, no threshold chosen.* The command generates (or replays) a reproducible
-split manifest, then scores the held-back Indy positives and the Oxford
-negatives against the gallery and prints the textual distribution report. It
-answers the first question worth answering -- do the positive and negative score
-distributions separate at all? -- without picking any cutoff (that is V1/V2).
+This is the V0+V1 slice of ``docs/calibration_design.md`` Sec. 5. The command
+generates (or replays) a reproducible split manifest, then scores the held-back
+Indy positives and the Oxford negatives against the gallery and prints the
+textual report: the V0 distributions (do the positive and negative scores
+separate at all?) plus the V1 threshold sweep -- a ``cutoff -> FPR , recall``
+trade-off table with a separate per-breed FPR table. No cutoff is chosen here;
+picking one by policy is V2.
 
 Generation is folded into this one command (no separate generate/calibrate
 dance). The split logic lives in the reusable ``split_manifest`` module; the
@@ -26,6 +27,9 @@ Usage::
     # the alternate aggregation, and an optional per-image score dump
     uv run python scripts/calibrate.py --aggregation mean-top3 \
         --scores-out data/splits/scores.csv
+
+    # a coarser threshold-sweep grid (fewer cutoff rows)
+    uv run python scripts/calibrate.py --sweep-step 0.1
 
     # also write an HTML report with embedded images (bare flag auto-names
     # into data/reports/; or pass an explicit path)
@@ -171,6 +175,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional CSV of per-image scores joined with provenance",
     )
     parser.add_argument(
+        "--sweep-step",
+        type=float,
+        default=0.05,
+        help="cutoff granularity for the threshold-sweep trade-off table "
+        "(default: 0.05)",
+    )
+    parser.add_argument(
         "--html",
         nargs="?",
         const=_HTML_AUTO,
@@ -248,6 +259,7 @@ def run_calibration(
     aggregation: Aggregation,
     scores_out: Path | None,
     html_out: Path | None,
+    sweep_step: float,
 ) -> None:
     """Score the positives/negatives against the gallery and print the report.
 
@@ -273,7 +285,16 @@ def run_calibration(
     )
 
     print()
-    print(build_report(label, len(gallery.names), positives, negatives, aggregation))
+    print(
+        build_report(
+            label,
+            len(gallery.names),
+            positives,
+            negatives,
+            aggregation,
+            sweep_step=sweep_step,
+        )
+    )
     if scores_out is not None:
         write_scores_csv(scores_out, positives, negatives)
         print(f"\nPer-image scores written to {scores_out}")
@@ -285,6 +306,7 @@ def run_calibration(
             positives,
             negatives,
             aggregation,
+            sweep_step=sweep_step,
         )
         print(f"\nHTML report written to {html_out}")
 
@@ -340,6 +362,7 @@ def main(argv: list[str] | None = None) -> None:
                 args.aggregation,
                 Path(args.scores_out) if args.scores_out is not None else None,
                 html_out,
+                args.sweep_step,
             )
     except SplitConfigError as err:
         raise SystemExit(str(err)) from err
