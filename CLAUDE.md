@@ -11,7 +11,9 @@ Early implementation. The first two pipeline stages exist, and both galleries (p
 - **Negatives gallery** — `scripts/build_oxford_negatives.py` produces the calibration/eval negatives from Oxford-IIIT Pet. torchvision is used for download+md5 only; iteration is over `annotations/list.txt` (species 1 → **all 2371 cats across both paper splits**, not one `OxfordIIITPet` split). It re-detects with the same YOLO (Oxford's shipped head-only boxes are **ignored**, keeping positives/negatives on identical footing), keeps the top crop per image, and writes `data/embeddings/oxford/{embeddings.npy,metadata.csv}` in the same format as Indy plus a `breed` column. Flags `--download-only`, `--no-detect`, `--limit` mirror the toggles; a `catalog.csv` (every cat image → breed) is written to `images/oxford-iiit-pet/` beside the data, like Indy's `mapping.csv`. Full run measured **103/2371 no-cat misses (~4.3%)** with yolo11x; misses are not embedded (recoverable as catalog minus metadata `source_filename`).
 - Shared script helpers live in `scripts/_common.py`: `load_image`, `iter_images`, and the embedding/metadata helpers both gallery builders share (`embed_in_batches`, `GalleryRow`, `BASE_METADATA_COLUMNS`, `base_metadata_cells`).
 
-torch is installed with CUDA from the pytorch-cu128 index (PyPI's Windows wheel is CPU-only — keep the `tool.uv` index pinning); GPU verified working. The **decide stage is not yet written**; its module layout is still open.
+torch is installed with CUDA from the pytorch-cu128 index (PyPI's Windows wheel
+is CPU-only — keep the `tool.uv` index pinning); GPU verified working. The
+**decide stage** implementation is in progress see `docs/calibration_design.md`.
 
 ## Tooling & commands
 
