@@ -23,14 +23,17 @@ build-backend = "hatchling.build"
 
 # On Windows the default PyPI torch wheel is CPU-only; pull torch/torchvision
 # from PyTorch's CUDA 12.8 index instead (RTX 3070 / driver 580.88 supports it).
+# The CUDA index has no macOS wheels, so the override is scoped to Windows: on
+# macOS (Apple Silicon) uv falls back to the default PyPI wheel, which ships the
+# MPS/Metal backend.
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32'" }]
 
 [dependency-groups]
 dev = [

@@ -24,6 +24,15 @@ from PIL import Image
 from transformers import AutoImageProcessor, AutoModel
 
 
+def _default_device() -> str:
+    """Pick the best available backend: CUDA, then Apple MPS, then CPU."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class Embedder:
     """Frozen DINOv2 backbone that maps an image to an embedding vector.
 
@@ -39,7 +48,7 @@ class Embedder:
         model: str = "facebook/dinov2-base",
         device: str | None = None,
     ) -> None:
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or _default_device()
         self._processor = AutoImageProcessor.from_pretrained(model)
         self._model = AutoModel.from_pretrained(model)
         self._model.eval().to(self.device)
