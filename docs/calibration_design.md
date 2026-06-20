@@ -157,9 +157,63 @@ Built in stages, each validating before adding features:
 - **V0 — distributions only.** Builds the core scoring (`src/indycat/decision.py`: normalize + aggregate against gallery) and the calibrate driver that emits the report above. **No threshold is chosen.** Answers the first question worth answering: *do the distributions separate at all?* If they do not, that is learned immediately, before any threshold machinery is built on a foundation that does not hold.
 - **V1 — trade-off curve.** A threshold sweep: a table of `cutoff → FPR (overall, look-alike, per breed) , recall-on-Indy`. The trade-off becomes visible; still human-read.
 - **V2 — automated pick by explicit policy.** Given the now-understood shape, a `--policy` flag (e.g. target-FPR / Youden's J / equal-error) emits a chosen threshold. This is where the judgement is encoded — deliberately last.
-- **V3 — freeze it.** Write the calibration artifact (a small file: threshold + aggregation + the curve) that the decide stage consumes, and add aggregation comparison (`max` vs `mean-top3`) in one run.
+- **V3 — freeze it.** Write the calibration artifact that the decide stage consumes (contents specified below), and add aggregation comparison (`max` vs `mean-top3`) in one run.
 
 The scoring code lives in the core (`decision.py`); calibrate is a thin driver over it. Building V0 therefore also delivers and validates the core decide API.
+
+### V3 — the calibration artifact
+
+The artifact is the frozen output of calibration and the input to both the live decide stage and `evaluate.py`. It has **two jobs, kept visibly separate in the file**: the *operative* fields decide actually reads to produce a verdict, and the *provenance + curve* that make a frozen number auditable rather than a bare magic constant. Writing it is essentially serializing V2's `ThresholdChoice` (chosen `SweepRow` + rationale) plus the sweep and a binding to the gallery it was calibrated against.
+
+**Bundled, not referenced.** The artifact ships the gallery vectors with it, so a deployed decide stage needs nothing else — consistent with the handoff's "store Indy's gallery as vectors, keep any deployed version lean, don't ship his photos." Concretely a **pair**: a human-readable `calibration.yaml` (operative fields + provenance + curve + gallery manifest) and a companion `gallery.npy` holding the raw, un-normalized gallery vectors row-aligned to that manifest (raw so `decision.Gallery` keeps L2-normalizing on construction; floats are not base64'd into the YAML). A `fingerprint` over the vectors is kept in the YAML regardless, so an accidental vector/threshold mismatch is a loud failure, not a silently-wrong verdict.
+
+**Operative (read by decide):**
+
+- **`threshold`** — the cutoff, at full precision off V2's fine `candidate_cutoffs` grid (not a rounded display cutoff).
+- **`aggregation`** — `max` | `mean-top3`. The threshold is only meaningful under the aggregation that produced it, so decide must score with the same one. This is why aggregation is deliberately *out* of the manifest (§3) but *in* here.
+- **`comparison`** — recorded explicitly as `">="` (`score >= threshold` → Indy). Fixed in code, but a frozen artifact should not leave the convention implicit.
+- **`gallery`** — the binding that makes the threshold valid only for *this* gallery: the companion `vectors` file, a `fingerprint` (loud drift check), `count`, and per-row `source_filename` + `position`/`view` so decide can still name the best-matching gallery photo (§1's inspectable output) without `mapping.csv`.
+
+**Provenance + curve (audit, not consumed at decide time):**
+
+- **`chosen_by`** — `manifest` path, `seed`, `policy`, and its params (`target_fpr`, `target_fpr_group`): V2's rationale, serialized.
+- **`metrics_at_threshold`** — the chosen `SweepRow` (`fpr_all`, `fpr_look_alike`, `fpr_easy`, `recall_indy`, `n_pos`, `n_neg`): what the number buys.
+- **`aggregation_comparison`** — V3's `max`-vs-`mean-top3` run: each candidate's threshold + headline metrics + the `winner`, justifying the `aggregation` field above.
+- **`sweep`** — the full V1 curve, so the frozen threshold reads as a point on a visible trade-off.
+- **`format_version`** — asserted loudly at load, like the manifest.
+
+Illustrative `calibration.yaml`:
+
+```yaml
+format_version: 1
+
+# operative — read by decide
+threshold: 0.7213
+aggregation: max
+comparison: ">="
+gallery:
+  vectors: gallery.npy            # raw vectors, row-aligned to images below
+  fingerprint: sha256:...         # loud drift check
+  count: 15
+  images:
+    - {source_filename: ..., position: ..., view: ...}
+
+# provenance — audit, not consumed
+chosen_by: {manifest: data/splits/run-....yaml, seed: 12345,
+            policy: target-fpr, target_fpr: 0.05, target_fpr_group: look-alike}
+metrics_at_threshold: {fpr_all: 0.012, fpr_look_alike: 0.048, fpr_easy: 0.0,
+                       recall_indy: 1.0, n_pos: 10, n_neg: 712}
+aggregation_comparison:
+  max:       {threshold: 0.72, fpr_look_alike: 0.048, recall_indy: 1.0}
+  mean-top3: {threshold: 0.66, fpr_look_alike: 0.061, recall_indy: 1.0}
+  winner: max
+
+# the curve — trade-off context
+sweep:
+  - {cutoff: 0.50, fpr_all: ..., fpr_look_alike: ..., fpr_easy: ..., recall_indy: ...}
+```
+
+**Not in the artifact:** any `test`-role data or test numbers — those are `evaluate.py`'s output (§6 boundary). The artifact is calibrate's frozen *input* to evaluate; it never carries the exam. Written under `data/artifacts/` (gitignored, like manifests under `data/splits/`); YAML keeps it diffable and screen-reader-navigable. `evaluate.py` reads it back and asserts `format_version` and `fingerprint` before scoring the test set.
 
 ## 6. Boundaries & discipline
 
