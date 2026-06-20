@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from calibration import cli as calibrate
+from calibration.artifact import load_artifact
 from calibration.manifest import IndyRecord, OxfordRecord, load_manifest
 
 BASE_COLUMNS = [
@@ -179,3 +180,46 @@ def test_load_manifest_path_scores_the_replayed_split(
     printed = capsys.readouterr().out
     assert "Loaded manifest" in printed
     assert "Score distribution" in printed  # replay scores too
+
+
+def test_artifact_requires_policy(
+    fake_data: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        calibrate.main(["--out", str(tmp_path / "m.yaml"), "--artifact"])
+    assert "requires --policy" in capsys.readouterr().err
+
+
+def test_artifact_writes_yaml_and_vectors(
+    fake_data: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The real mapping.csv has no synthetic indy_NN names, so stub position/view.
+    monkeypatch.setattr(
+        calibrate,
+        "load_indy_positions",
+        lambda: {f"indy_{i:02d}.jpeg": ("pos", "view") for i in range(35)},
+    )
+    out = tmp_path / "m.yaml"
+    artifact_path = tmp_path / "calibration.yaml"
+    calibrate.main(
+        [
+            "--out",
+            str(out),
+            "--policy",
+            "target-fpr",
+            "--artifact",
+            str(artifact_path),
+        ]
+    )
+    vectors_path = tmp_path / "calibration.gallery.npy"
+    assert artifact_path.exists()
+    assert vectors_path.exists()
+    assert "Calibration artifact written to" in capsys.readouterr().out
+
+    artifact, vectors = load_artifact(artifact_path)  # round-trips + validates
+    assert artifact.aggregation in ("max", "mean-top3")
+    assert artifact.gallery_count == 15
+    assert vectors.shape[0] == 15

@@ -1,19 +1,21 @@
-"""Calibrate the decide stage: split, score, report distributions + sweep (V0+V1).
+"""Calibrate the decide stage: split, score, report, and freeze the artifact.
 
-This is the V0+V1 slice of ``docs/calibration_design.md`` Sec. 5. The command
-generates (or replays) a reproducible split manifest, then scores the held-back
-Indy positives and the Oxford negatives against the gallery and prints the
-textual report: the V0 distributions (do the positive and negative scores
-separate at all?) plus the V1 threshold sweep -- a ``cutoff -> FPR , recall``
-trade-off table with a separate per-breed FPR table. No cutoff is chosen here;
-picking one by policy is V2.
+The full V0--V3 command of ``docs/calibration_design.md`` Sec. 5. It generates
+(or replays) a reproducible split manifest, then scores the held-back Indy
+positives and the Oxford negatives against the gallery and prints the textual
+report: the V0 distributions (do the positive and negative scores separate at
+all?) and the V1 threshold sweep (a ``cutoff -> FPR , recall`` trade-off table
+plus a per-breed FPR table). With ``--policy`` it also picks a cutoff (V2); with
+``--artifact`` it freezes the V3 calibration artifact -- a ``calibration.yaml`` +
+companion ``.gallery.npy`` decide consumes -- running the pick under both
+aggregations and recording the FPR-first winner as the operative one.
 
 Generation is folded into this one command (no separate generate/calibrate
 dance). The split logic lives in the reusable ``calibration.manifest`` module;
 the scoring/report logic in ``calibration.scoring`` / ``calibration.report_text``
-/ ``calibration.report_html`` over the ``indycat.decision`` core.
-``--generate-only`` stops after writing the manifest. ``scripts/calibrate.py`` is
-the thin entry-point shim that calls :func:`main` here.
+/ ``calibration.report_html`` over the ``indycat.decision`` core; the artifact in
+``calibration.artifact``. ``--generate-only`` stops after writing the manifest.
+``scripts/calibrate.py`` is the thin entry-point shim that calls :func:`main`.
 
 Usage::
 
@@ -38,6 +40,10 @@ Usage::
     uv run python scripts/calibrate.py --html
     uv run python scripts/calibrate.py --html data/reports/run.html
 
+    # freeze the calibration artifact (V3): runs both aggregations, auto-selects
+    # the FPR-first winner, writes data/artifacts/<auto>.yaml + .gallery.npy
+    uv run python scripts/calibrate.py --policy target-fpr --artifact
+
     # fresh random seed (the drawn seed is recorded in the written manifest)
     uv run python scripts/calibrate.py --random-seed
 
@@ -51,8 +57,19 @@ import argparse
 import random
 from pathlib import Path
 
+import numpy as np
+from numpy.typing import NDArray
+
 from _common import load_cached_embeddings
+from calibration.artifact import (
+    GALLERY_VECTORS_SUFFIX,
+    AggregationResult,
+    build_artifact,
+    load_indy_positions,
+    write_artifact,
+)
 from calibration.manifest import (
+    ARTIFACTS_DIR,
     DEFAULT_CALIBRATION,
     DEFAULT_GALLERY,
     DEFAULT_OXFORD_TEST_FRACTION,
@@ -89,6 +106,9 @@ from indycat.decision import AGGREGATIONS, Aggregation, Gallery
 
 #: Sentinel for a bare ``--html`` (no path given) -> auto-name into REPORTS_DIR.
 _HTML_AUTO = "<auto>"
+
+#: Sentinel for a bare ``--artifact`` (no path) -> auto-name into ARTIFACTS_DIR.
+_ARTIFACT_AUTO = "<auto>"
 
 #: Generation flags; if any is explicitly set, --manifest (replay) is rejected.
 _GENERATION_FLAGS = (
@@ -193,6 +213,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="also write an HTML report with embedded images; bare flag auto-names "
         "into data/reports/, or give an explicit path",
     )
+    parser.add_argument(
+        "--artifact",
+        nargs="?",
+        const=_ARTIFACT_AUTO,
+        default=None,
+        help="freeze the calibration artifact (V3): a calibration.yaml + companion "
+        ".gallery.npy decide consumes; requires --policy. Bare flag auto-names into "
+        "data/artifacts/, or give an explicit .yaml path",
+    )
     # V2 threshold pick -- without --policy no cutoff is chosen (V1 behaviour).
     parser.add_argument(
         "--policy",
@@ -261,6 +290,18 @@ def default_report_name(params: GenerationParams, aggregation: Aggregation) -> s
     )
 
 
+def default_artifact_name(params: GenerationParams, policy: str) -> str:
+    """A deterministic filename for an auto-saved calibration artifact.
+
+    The operative aggregation is auto-selected (the winner of the max-vs-mean-top3
+    run), so it is *not* in the name -- it is unknown until the run completes.
+    """
+    return (
+        f"calibration-{params.strategy}-seed{params.seed}-g{params.gallery}"
+        f"-c{params.calibration}-t{params.test}-{policy}.yaml"
+    )
+
+
 def summarize(manifest: SplitManifest) -> str:
     """A textual, screen-reader-friendly summary of a manifest's roles."""
     lines = [
@@ -286,14 +327,16 @@ def run_calibration(
     policy: PickPolicy | None = None,
     target_fpr: float = 0.05,
     target_group: TargetGroup = "look-alike",
+    artifact_out: Path | None = None,
 ) -> None:
     """Score the positives/negatives against the gallery and print the report.
 
     The V0 measurement step: build the gallery from the ``gallery`` role, score
     the held-back ``calibration`` positives and the Oxford ``setup`` negatives
     against it, and emit the textual distribution report. When ``policy`` is set
-    (V2), an explicit threshold is picked and reported too. The ``test`` role is
-    never read here -- that is ``evaluate.py``'s job.
+    (V2), an explicit threshold is picked and reported too. When ``artifact_out``
+    is set (V3, requires ``policy``), the frozen calibration artifact is written.
+    The ``test`` role is never read here -- that is ``evaluate.py``'s job.
     """
     indy_names, indy_vectors = load_cached_embeddings(INDY_METADATA, INDY_EMBEDDINGS)
     oxford_names, oxford_vectors = load_cached_embeddings(
@@ -303,9 +346,8 @@ def run_calibration(
     oxford_lookup = build_name_to_vector(oxford_names, oxford_vectors)
     breeds = {record.source_filename: record.breed for record in load_oxford_metadata()}
 
-    gallery = Gallery.from_raw(
-        manifest.indy_gallery, select_vectors(manifest.indy_gallery, indy_lookup)
-    )
+    raw_gallery_vectors = select_vectors(manifest.indy_gallery, indy_lookup)
+    gallery = Gallery.from_raw(manifest.indy_gallery, raw_gallery_vectors)
     positives = score_role(manifest.indy_calibration, indy_lookup, gallery, aggregation)
     negatives = score_role(
         manifest.oxford_setup, oxford_lookup, gallery, aggregation, breeds=breeds
@@ -350,6 +392,77 @@ def run_calibration(
             choice=choice,
         )
         print(f"\nHTML report written to {html_out}")
+    if artifact_out is not None:
+        assert policy is not None  # guaranteed by the CLI; an artifact needs a pick
+        _write_calibration_artifact(
+            manifest,
+            label,
+            gallery,
+            raw_gallery_vectors,
+            indy_lookup,
+            oxford_lookup,
+            breeds,
+            artifact_out,
+            policy=policy,
+            target_fpr=target_fpr,
+            target_group=target_group,
+            sweep_step=sweep_step,
+        )
+
+
+def _write_calibration_artifact(
+    manifest: SplitManifest,
+    label: str,
+    gallery: Gallery,
+    raw_gallery_vectors: NDArray[np.float32],
+    indy_lookup: dict[str, NDArray[np.float32]],
+    oxford_lookup: dict[str, NDArray[np.float32]],
+    breeds: dict[str, str],
+    artifact_out: Path,
+    *,
+    policy: PickPolicy,
+    target_fpr: float,
+    target_group: TargetGroup,
+    sweep_step: float,
+) -> None:
+    """Score both aggregations, build the artifact, and write the YAML + npy pair.
+
+    The operative aggregation is auto-selected as the FPR-first winner of the
+    max-vs-mean-top3 comparison (``calibration.artifact.build_artifact``), so both
+    are scored here regardless of the report's ``--aggregation``.
+    """
+    results: dict[Aggregation, AggregationResult] = {}
+    for agg in AGGREGATIONS:
+        pos = score_role(manifest.indy_calibration, indy_lookup, gallery, agg)
+        neg = score_role(
+            manifest.oxford_setup, oxford_lookup, gallery, agg, breeds=breeds
+        )
+        agg_choice = pick_threshold(
+            pos, neg, policy, target_fpr=target_fpr, target_group=target_group
+        )
+        results[agg] = (pos, neg, agg_choice)
+
+    artifact = build_artifact(
+        manifest,
+        label,
+        manifest.indy_gallery,
+        raw_gallery_vectors,
+        load_indy_positions(),
+        results,
+        artifact_out.stem + GALLERY_VECTORS_SUFFIX,
+        policy=policy,
+        target_fpr=target_fpr,
+        target_fpr_group=target_group,
+        sweep_step=sweep_step,
+    )
+    vectors_path = write_artifact(artifact, raw_gallery_vectors, artifact_out)
+    print(
+        f"\nCalibration artifact written to {artifact_out} "
+        f"(+ {vectors_path.name})\n"
+        f"  winner: {artifact.winner}   threshold: {artifact.threshold:.4f}   "
+        f"recall: {artifact.metrics_at_threshold.recall_indy:.3f}   "
+        f"FPR(look-alike): {artifact.metrics_at_threshold.fpr_look_alike:.3f}"
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -366,6 +479,11 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(
                 f"--manifest cannot be combined with generation flags: {explicit}"
             )
+
+    if args.artifact is not None and args.policy is None:
+        parser.error(
+            "--artifact requires --policy (an artifact must freeze a chosen threshold)"
+        )
 
     try:
         if args.manifest is not None:
@@ -397,6 +515,14 @@ def main(argv: list[str] | None = None) -> None:
                 )
             else:
                 html_out = Path(args.html)
+            if args.artifact is None:
+                artifact_out = None
+            elif args.artifact == _ARTIFACT_AUTO:
+                artifact_out = ARTIFACTS_DIR / default_artifact_name(
+                    manifest.params, args.policy
+                )
+            else:
+                artifact_out = Path(args.artifact)
             run_calibration(
                 manifest,
                 label,
@@ -407,6 +533,7 @@ def main(argv: list[str] | None = None) -> None:
                 policy=args.policy,
                 target_fpr=args.target_fpr,
                 target_group=args.target_fpr_group,
+                artifact_out=artifact_out,
             )
     except SplitConfigError as err:
         raise SystemExit(str(err)) from err

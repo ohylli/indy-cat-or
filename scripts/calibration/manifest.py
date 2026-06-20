@@ -59,6 +59,10 @@ OXFORD_IMAGE_DIR = REPO_ROOT / "images" / "oxford-iiit-pet" / "images"
 #: like ``SPLITS_DIR``).
 REPORTS_DIR = REPO_ROOT / "data" / "reports"
 
+#: Default output location for the frozen calibration artifact pair (V3): the
+#: ``calibration.yaml`` + companion ``.gallery.npy``. Gitignored, like the others.
+ARTIFACTS_DIR = REPO_ROOT / "data" / "artifacts"
+
 #: Built-in seed so a zero-arg baseline run is bit-for-bit repeatable.
 DEFAULT_SEED = 20240601
 DEFAULT_GALLERY = 15
