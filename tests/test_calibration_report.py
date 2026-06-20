@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import calibration_report as cr
+import calibration as cr
 from _common import BASE_METADATA_COLUMNS, load_cached_embeddings
 from indycat.decision import Gallery
 

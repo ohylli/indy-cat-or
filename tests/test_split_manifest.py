@@ -14,9 +14,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from split_manifest import (
+from calibration.manifest import (
     DEFAULT_SEED,
     MANIFEST_FORMAT_VERSION,
+    REPO_ROOT,
     STRATEGY_THREE_WAY,
     GenerationParams,
     IndyRecord,
@@ -44,6 +45,23 @@ BASE_COLUMNS = [
     "y2",
     "area_fraction",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Module layout
+# --------------------------------------------------------------------------- #
+
+
+def test_repo_root_resolves_to_the_repository() -> None:
+    """``REPO_ROOT`` must point at the actual repo root, not a parent of this file.
+
+    Every real data path (mapping/metadata/embeddings) is derived from
+    ``REPO_ROOT``, but the rest of the suite monkeypatches the loaders, so a wrong
+    root would never surface there. Anchoring on ``pyproject.toml`` catches the
+    off-by-one that a future move of ``manifest.py`` deeper into a package would
+    reintroduce.
+    """
+    assert (REPO_ROOT / "pyproject.toml").is_file()
 
 
 # --------------------------------------------------------------------------- #

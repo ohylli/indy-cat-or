@@ -1,4 +1,4 @@
-"""Light CLI smoke tests for ``calibrate.py``.
+"""Light CLI smoke tests for the calibrate command (``calibration.cli``).
 
 The split logic is covered in ``test_split_manifest`` and the scoring/report in
 ``test_calibration_report``; here we only check the CLI wiring: mutual exclusion,
@@ -15,8 +15,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import calibrate
-from split_manifest import IndyRecord, OxfordRecord, load_manifest
+from calibration import cli as calibrate
+from calibration.manifest import IndyRecord, OxfordRecord, load_manifest
 
 BASE_COLUMNS = [
     "row",

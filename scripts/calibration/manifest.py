@@ -6,9 +6,10 @@ experiment of the decide stage (`image -> detect -> crop -> embed -> decide`):
     Indy    gallery / calibration / test
     Oxford  setup / test
 
-It is the unit of an experiment. This module is the reusable generator a future
-``calibrate.py`` measurement step and ``evaluate.py`` import; it owns no scoring
-or threshold logic (that is the decide stage). The CLI lives in ``calibrate.py``.
+It is the unit of an experiment. This module is the reusable generator the
+``calibration.cli`` measurement step and a future ``evaluate.py`` import; it owns
+no scoring or threshold logic (that is the decide stage). The CLI lives in
+``calibration.cli`` (with the ``scripts/calibrate.py`` shim as its entry point).
 
 Three design guarantees (see ``docs/calibration_design.md`` Sec. 3) are encoded
 here, all guarding against silently-wrong numbers:
@@ -39,7 +40,8 @@ from typing import Any
 
 import yaml
 
-REPO_ROOT = Path(__file__).parent.parent
+# This file is scripts/calibration/manifest.py, so the repo root is three levels up.
+REPO_ROOT = Path(__file__).parent.parent.parent
 INDY_METADATA = REPO_ROOT / "data" / "embeddings" / "indy" / "metadata.csv"
 INDY_EMBEDDINGS = REPO_ROOT / "data" / "embeddings" / "indy" / "embeddings.npy"
 OXFORD_METADATA = REPO_ROOT / "data" / "embeddings" / "oxford" / "metadata.csv"
