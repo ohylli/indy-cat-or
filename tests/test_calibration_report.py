@@ -186,6 +186,138 @@ def test_build_report_includes_sweep_sections() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# threshold pick (V2)
+# --------------------------------------------------------------------------- #
+
+
+def _pick_data() -> tuple[list[cr.ScoredImage], list[cr.ScoredImage]]:
+    """A small fixed split with hand-checkable cutoffs.
+
+    Positives 0.9, 0.6; look-alike (Persian) negatives 0.5, 0.7; easy negative 0.3.
+    Distinct scores {0.3,0.5,0.6,0.7,0.9} -> candidate midpoints {0.4,0.55,0.65,0.8}
+    plus bracketing endpoints, so picks land on those midpoints.
+    """
+    positives = [
+        cr.ScoredImage("p0", 0.9, "g0", None),
+        cr.ScoredImage("p1", 0.6, "g0", None),
+    ]
+    negatives = [
+        cr.ScoredImage("Persian_1.jpg", 0.5, "g0", "Persian"),
+        cr.ScoredImage("Persian_2.jpg", 0.7, "g0", "Persian"),
+        cr.ScoredImage("Abyssinian_1.jpg", 0.3, "g0", "Abyssinian"),
+    ]
+    return positives, negatives
+
+
+def test_candidate_cutoffs_are_sorted_midpoints_bracketing_the_range() -> None:
+    positives = [cr.ScoredImage("p", 0.8, "g0", None)]
+    negatives = [
+        cr.ScoredImage("n0", 0.2, "g0", "Abyssinian"),
+        cr.ScoredImage("n1", 0.5, "g0", "Abyssinian"),
+    ]
+    cuts = cr.candidate_cutoffs(positives, negatives)
+    assert cuts == sorted(cuts)
+    assert cuts[0] < 0.2 and cuts[-1] > 0.8  # endpoints bracket the data
+    # Interior candidates are midpoints between adjacent distinct scores.
+    assert cuts[1] == pytest.approx(0.35)  # (0.2 + 0.5) / 2
+    assert cuts[2] == pytest.approx(0.65)  # (0.5 + 0.8) / 2
+    # No candidate coincides with an observed score (keeps >= unambiguous).
+    assert all(c not in (0.2, 0.5, 0.8) for c in cuts)
+
+
+def test_candidate_cutoffs_empty_is_empty() -> None:
+    assert cr.candidate_cutoffs([], []) == []
+
+
+def test_pick_target_fpr_lookalike_default_respects_budget() -> None:
+    positives, negatives = _pick_data()
+    choice = cr.pick_threshold(positives, negatives, "target-fpr")  # 0.05, look-alike
+    # Only cutoffs above both Persians (>= 0.7) keep look-alike FPR within 0.05;
+    # the lowest such midpoint is 0.8, which keeps recall = 0.5 (only the 0.9 pos).
+    assert choice.policy == "target-fpr"
+    assert choice.row.cutoff == pytest.approx(0.8)
+    assert choice.row.fpr_lookalike == pytest.approx(0.0)
+    assert choice.row.recall == pytest.approx(0.5)
+    assert "look-alike" in choice.rationale
+
+
+def test_pick_target_fpr_looser_budget_lowers_cutoff_for_more_recall() -> None:
+    positives, negatives = _pick_data()
+    choice = cr.pick_threshold(positives, negatives, "target-fpr", target_fpr=0.5)
+    # FPR(look-alike) = 0.5 is now within budget at cutoff 0.55, recall climbs to 1.0.
+    assert choice.row.cutoff == pytest.approx(0.55)
+    assert choice.row.fpr_lookalike == pytest.approx(0.5)
+    assert choice.row.recall == pytest.approx(1.0)
+
+
+def test_pick_target_fpr_overall_group() -> None:
+    positives, negatives = _pick_data()
+    choice = cr.pick_threshold(
+        positives, negatives, "target-fpr", target_fpr=0.5, target_group="overall"
+    )
+    # Overall FPR drops to 1/3 at cutoff 0.55 (only the 0.7 Persian clears it).
+    assert choice.row.cutoff == pytest.approx(0.55)
+    assert choice.row.fpr_overall == pytest.approx(1 / 3)
+    assert "overall" in choice.rationale
+
+
+def test_pick_youdens_j_maximises_recall_minus_fpr() -> None:
+    positives, negatives = _pick_data()
+    choice = cr.pick_threshold(positives, negatives, "youdens-j")
+    # J peaks at 0.55: recall 1.0 - FPR(all) 1/3 = 0.667, beating every other cutoff.
+    assert choice.row.cutoff == pytest.approx(0.55)
+
+
+def test_pick_youdens_j_ties_break_to_higher_cutoff() -> None:
+    positives = [
+        cr.ScoredImage("p0", 0.9, "g0", None),
+        cr.ScoredImage("p1", 0.3, "g0", None),
+    ]
+    negatives = [
+        cr.ScoredImage("n0", 0.1, "g0", "Abyssinian"),
+        cr.ScoredImage("n1", 0.7, "g0", "Abyssinian"),
+    ]
+    # J = 0.5 at both cutoff 0.2 and 0.8; the tie-break prefers the higher (fewer FPs).
+    choice = cr.pick_threshold(positives, negatives, "youdens-j")
+    assert choice.row.cutoff == pytest.approx(0.8)
+
+
+def test_pick_equal_error_balances_fpr_and_miss_rate() -> None:
+    positives, negatives = _pick_data()
+    choice = cr.pick_threshold(positives, negatives, "equal-error")
+    # |FPR - (1-recall)| is smallest (0.167) at cutoff 0.65.
+    assert choice.row.cutoff == pytest.approx(0.65)
+
+
+def test_pick_threshold_empty_groups_raise() -> None:
+    neg = [cr.ScoredImage("n", 0.3, "g0", "Persian")]
+    pos = [cr.ScoredImage("p", 0.8, "g0", None)]
+    with pytest.raises(ValueError, match="positive"):
+        cr.pick_threshold([], neg, "youdens-j")
+    with pytest.raises(ValueError, match="negative"):
+        cr.pick_threshold(pos, [], "youdens-j")
+
+
+def test_pick_target_fpr_lookalike_without_lookalikes_raises() -> None:
+    positives = [cr.ScoredImage("p", 0.8, "g0", None)]
+    negatives = [cr.ScoredImage("Abyssinian_1.jpg", 0.5, "g0", "Abyssinian")]
+    with pytest.raises(ValueError, match="look-alike"):
+        cr.pick_threshold(positives, negatives, "target-fpr")
+
+
+def test_build_report_includes_chosen_threshold_only_when_given() -> None:
+    positives, negatives = _pick_data()
+    without = cr.build_report("m.yaml", 5, positives, negatives, "max")
+    assert "Chosen threshold" not in without
+    choice = cr.pick_threshold(positives, negatives, "youdens-j")
+    with_choice = cr.build_report(
+        "m.yaml", 5, positives, negatives, "max", choice=choice
+    )
+    assert "Chosen threshold (policy=youdens-j)" in with_choice
+    assert "cutoff 0.550" in with_choice
+
+
+# --------------------------------------------------------------------------- #
 # render_report_html / write_report_html
 # --------------------------------------------------------------------------- #
 
@@ -255,6 +387,37 @@ def test_render_report_html_lists_every_gallery_photo(tmp_path: Path) -> None:
     document, _, _ = _html_fixture(tmp_path)
     assert 'src="../../images/indy/g0.jpg"' in document
     assert 'src="../../images/indy/g1.jpg"' in document
+
+
+def test_render_report_html_chosen_threshold_section(tmp_path: Path) -> None:
+    positives = [cr.ScoredImage("indy_a.jpg", 0.9, "g0.jpg", None)]
+    negatives = [cr.ScoredImage("Persian_1.jpg", 0.5, "g0.jpg", "Persian")]
+    choice = cr.pick_threshold(positives, negatives, "youdens-j")
+    html_path = tmp_path / "data" / "reports" / "r.html"
+    without = cr.render_report_html(
+        "m.yaml",
+        ["g0.jpg"],
+        positives,
+        negatives,
+        "max",
+        html_path=html_path,
+        indy_image_dir=tmp_path / "images" / "indy",
+        oxford_image_dir=tmp_path / "images" / "oxford",
+    )
+    assert "<h2>Chosen threshold</h2>" not in without
+    with_choice = cr.render_report_html(
+        "m.yaml",
+        ["g0.jpg"],
+        positives,
+        negatives,
+        "max",
+        html_path=html_path,
+        choice=choice,
+        indy_image_dir=tmp_path / "images" / "indy",
+        oxford_image_dir=tmp_path / "images" / "oxford",
+    )
+    assert "<h2>Chosen threshold</h2>" in with_choice
+    assert "<code>youdens-j</code>" in with_choice
 
 
 def test_write_report_html_roundtrips(tmp_path: Path) -> None:

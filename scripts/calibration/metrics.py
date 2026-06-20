@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -162,3 +163,113 @@ def select_risk_rows(
     worst_neg = sorted(negatives, key=lambda s: s.score, reverse=True)[:RISK_ROWS]
     hardest_pos = sorted(positives, key=lambda s: s.score)[:RISK_ROWS]
     return worst_neg, hardest_pos
+
+
+# --------------------------------------------------------------------------- #
+# Threshold pick (V2: an explicit policy chooses one cutoff off the curve)
+# --------------------------------------------------------------------------- #
+
+#: Which automated policy chooses the cutoff (``docs/calibration_design.md`` V2).
+PickPolicy = Literal["target-fpr", "youdens-j", "equal-error"]
+PICK_POLICIES: tuple[PickPolicy, ...] = ("target-fpr", "youdens-j", "equal-error")
+
+#: Which negative group the ``target-fpr`` budget applies to.
+TargetGroup = Literal["overall", "look-alike"]
+TARGET_GROUPS: tuple[TargetGroup, ...] = ("overall", "look-alike")
+
+#: Pad placing the below-min / above-max endpoints just outside the data range.
+#: Only the *reported* endpoint cutoff shifts by this; it never changes which
+#: scores clear the bar (the endpoint stays strictly outside the observed range).
+_ENDPOINT_PAD = 1e-3
+
+
+@dataclass(frozen=True)
+class ThresholdChoice:
+    """A cutoff chosen by an explicit policy, with its trade-off at that cutoff.
+
+    ``row`` is the :class:`SweepRow` evaluated at the chosen cutoff (so it carries
+    the cutoff plus FPR(all/look-alike/easy) and recall); ``rationale`` is the
+    human-readable reason the policy landed there.
+    """
+
+    policy: str
+    row: SweepRow
+    rationale: str
+
+
+def candidate_cutoffs(
+    positives: list[ScoredImage], negatives: list[ScoredImage]
+) -> list[float]:
+    """A fine candidate grid for policy picking: midpoints + bracketing endpoints.
+
+    Unlike the round V1 sweep grid (multiples of ``--sweep-step``), this is derived
+    from the *actual* scores so the chosen threshold is precise. Candidates are the
+    midpoints between adjacent distinct observed scores -- so no candidate equals an
+    observed score and the ``>=`` convention is unambiguous -- plus an endpoint just
+    below the minimum (everything clears: FPR=1, recall=1) and just above the
+    maximum (nothing clears: FPR=0, recall=0). Returns an empty list with no scores.
+    """
+    scores = sorted({s.score for s in positives} | {s.score for s in negatives})
+    if not scores:
+        return []
+    midpoints = [(lo + hi) / 2 for lo, hi in zip(scores, scores[1:], strict=False)]
+    return [scores[0] - _ENDPOINT_PAD, *midpoints, scores[-1] + _ENDPOINT_PAD]
+
+
+def pick_threshold(
+    positives: list[ScoredImage],
+    negatives: list[ScoredImage],
+    policy: PickPolicy,
+    *,
+    target_fpr: float = 0.05,
+    target_group: TargetGroup = "look-alike",
+) -> ThresholdChoice:
+    """Choose one cutoff off the trade-off curve by an explicit policy (V2).
+
+    All policies score the fine :func:`candidate_cutoffs` grid via
+    :func:`build_sweep` (same ``>=`` convention and FPR/recall math as V1), then
+    pick one row:
+
+    - ``target-fpr`` -- the *lowest* cutoff (max recall) whose FPR over
+      ``target_group`` is ``<= target_fpr``. The above-max endpoint (FPR=0) makes
+      a feasible pick guaranteed.
+    - ``youdens-j`` -- the cutoff maximising ``recall - fpr_overall``.
+    - ``equal-error`` -- the cutoff minimising ``|fpr_overall - (1 - recall)|``.
+
+    Ties break toward the *higher* cutoff (fewer false positives). Raises
+    ``ValueError`` for empty positives/negatives, or a ``look-alike`` target with
+    no look-alike negatives -- never returns a silently-wrong (NaN-driven) pick.
+    """
+    if not positives:
+        raise ValueError("pick_threshold needs at least one positive")
+    if not negatives:
+        raise ValueError("pick_threshold needs at least one negative")
+    rows = build_sweep(positives, negatives, candidate_cutoffs(positives, negatives))
+
+    if policy == "target-fpr":
+        use_lookalike = target_group == "look-alike"
+        fprs = [r.fpr_lookalike if use_lookalike else r.fpr_overall for r in rows]
+        if use_lookalike and all(math.isnan(f) for f in fprs):
+            raise ValueError(
+                "target-fpr with group=look-alike needs look-alike negatives"
+            )
+        feasible = [r for r, f in zip(rows, fprs, strict=True) if f <= target_fpr]
+        # Lowest cutoff within budget = most recall; feasible is non-empty because
+        # the above-max endpoint has FPR=0 <= target_fpr.
+        chosen = min(feasible, key=lambda r: r.cutoff)
+        rationale = (
+            f"lowest cutoff with FPR({target_group}) <= {target_fpr:.3f} "
+            f"(maximises recall within the budget)"
+        )
+    elif policy == "youdens-j":
+        chosen = max(rows, key=lambda r: (r.recall - r.fpr_overall, r.cutoff))
+        rationale = "cutoff maximising Youden's J = recall - FPR(all)"
+    elif policy == "equal-error":
+        chosen = min(
+            rows, key=lambda r: (abs(r.fpr_overall - (1 - r.recall)), -r.cutoff)
+        )
+        rationale = "cutoff where FPR(all) ~= 1 - recall (equal-error rate)"
+    else:  # pragma: no cover - exhaustive over PickPolicy
+        raise ValueError(f"unknown policy: {policy}")
+
+    return ThresholdChoice(policy=policy, row=chosen, rationale=rationale)

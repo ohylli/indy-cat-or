@@ -75,6 +75,13 @@ from calibration.manifest import (
     load_oxford_metadata,
     write_manifest,
 )
+from calibration.metrics import (
+    PICK_POLICIES,
+    TARGET_GROUPS,
+    PickPolicy,
+    TargetGroup,
+    pick_threshold,
+)
 from calibration.report_html import write_report_html
 from calibration.report_text import build_report, write_scores_csv
 from calibration.scoring import build_name_to_vector, score_role, select_vectors
@@ -186,6 +193,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="also write an HTML report with embedded images; bare flag auto-names "
         "into data/reports/, or give an explicit path",
     )
+    # V2 threshold pick -- without --policy no cutoff is chosen (V1 behaviour).
+    parser.add_argument(
+        "--policy",
+        choices=PICK_POLICIES,
+        default=None,
+        help="automated threshold-picking policy (V2); without it no cutoff is chosen",
+    )
+    parser.add_argument(
+        "--target-fpr",
+        type=float,
+        default=0.05,
+        help="false-positive budget for --policy target-fpr (default: 0.05)",
+    )
+    parser.add_argument(
+        "--target-fpr-group",
+        choices=TARGET_GROUPS,
+        default="look-alike",
+        help="which negatives the target-fpr budget applies to (default: look-alike)",
+    )
     return parser
 
 
@@ -257,12 +283,16 @@ def run_calibration(
     scores_out: Path | None,
     html_out: Path | None,
     sweep_step: float,
+    policy: PickPolicy | None = None,
+    target_fpr: float = 0.05,
+    target_group: TargetGroup = "look-alike",
 ) -> None:
     """Score the positives/negatives against the gallery and print the report.
 
     The V0 measurement step: build the gallery from the ``gallery`` role, score
     the held-back ``calibration`` positives and the Oxford ``setup`` negatives
-    against it, and emit the textual distribution report. The ``test`` role is
+    against it, and emit the textual distribution report. When ``policy`` is set
+    (V2), an explicit threshold is picked and reported too. The ``test`` role is
     never read here -- that is ``evaluate.py``'s job.
     """
     indy_names, indy_vectors = load_cached_embeddings(INDY_METADATA, INDY_EMBEDDINGS)
@@ -281,6 +311,18 @@ def run_calibration(
         manifest.oxford_setup, oxford_lookup, gallery, aggregation, breeds=breeds
     )
 
+    choice = (
+        pick_threshold(
+            positives,
+            negatives,
+            policy,
+            target_fpr=target_fpr,
+            target_group=target_group,
+        )
+        if policy is not None
+        else None
+    )
+
     print()
     print(
         build_report(
@@ -290,6 +332,7 @@ def run_calibration(
             negatives,
             aggregation,
             sweep_step=sweep_step,
+            choice=choice,
         )
     )
     if scores_out is not None:
@@ -304,6 +347,7 @@ def run_calibration(
             negatives,
             aggregation,
             sweep_step=sweep_step,
+            choice=choice,
         )
         print(f"\nHTML report written to {html_out}")
 
@@ -360,6 +404,9 @@ def main(argv: list[str] | None = None) -> None:
                 Path(args.scores_out) if args.scores_out is not None else None,
                 html_out,
                 args.sweep_step,
+                policy=args.policy,
+                target_fpr=args.target_fpr,
+                target_group=args.target_fpr_group,
             )
     except SplitConfigError as err:
         raise SystemExit(str(err)) from err

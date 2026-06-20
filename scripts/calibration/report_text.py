@@ -19,6 +19,7 @@ from calibration.metrics import (
     RISK_ROWS,
     ScoredImage,
     Stats,
+    ThresholdChoice,
     build_breed_sweep,
     build_sweep,
     select_risk_rows,
@@ -157,6 +158,17 @@ def _per_breed_sweep_section(
     return lines
 
 
+def _choice_section(choice: ThresholdChoice) -> list[str]:
+    r = choice.row
+    return [
+        "",
+        f"Chosen threshold (policy={choice.policy}): {choice.rationale}",
+        f"  cutoff {r.cutoff:.3f}  ->  FPR(all) {_fmt(r.fpr_overall)}  "
+        f"FPR(look) {_fmt(r.fpr_lookalike)}  FPR(easy) {_fmt(r.fpr_easy)}  "
+        f"recall {_fmt(r.recall)}",
+    ]
+
+
 def _risk_sections(
     positives: list[ScoredImage], negatives: list[ScoredImage]
 ) -> list[str]:
@@ -179,8 +191,13 @@ def build_report(
     negatives: list[ScoredImage],
     aggregation: Aggregation,
     sweep_step: float = 0.05,
+    choice: ThresholdChoice | None = None,
 ) -> str:
-    """Render the full textual calibration report (V0 distributions + V1 sweep)."""
+    """Render the full textual calibration report (V0 distributions + V1 sweep).
+
+    When ``choice`` is given (V2), a "Chosen threshold" section follows the sweep
+    tables; without it the output is the unchanged V1 report.
+    """
     breeds = len({s.breed for s in negatives})
     header = [
         f"Calibration: {label}   (aggregation={aggregation})",
@@ -197,6 +214,7 @@ def build_report(
         *_per_breed_section(negatives),
         *_sweep_section(positives, negatives, thresholds),
         *_per_breed_sweep_section(negatives, thresholds),
+        *(_choice_section(choice) if choice is not None else []),
         *_risk_sections(positives, negatives),
     ]
     return "\n".join([*header, *sections])

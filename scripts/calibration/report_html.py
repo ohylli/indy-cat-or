@@ -23,6 +23,7 @@ from calibration.metrics import (
     RISK_ROWS,
     ScoredImage,
     Stats,
+    ThresholdChoice,
     build_breed_sweep,
     build_sweep,
     select_risk_rows,
@@ -180,6 +181,26 @@ def _html_breed_sweep(negatives: list[ScoredImage], thresholds: list[float]) -> 
     )
 
 
+def _html_choice(choice: ThresholdChoice) -> str:
+    """The V2 chosen-threshold section: rationale plus a one-row metrics table."""
+    r = choice.row
+    cols = ("FPR (all)", "FPR (look-alike)", "FPR (easy)", "recall (Indy)")
+    head = "".join(f'<th scope="col">{html.escape(c)}</th>' for c in cols)
+    cells = "".join(
+        f"<td>{_fmt_html(v)}</td>"
+        for v in (r.fpr_overall, r.fpr_lookalike, r.fpr_easy, r.recall)
+    )
+    return (
+        f"<p>Policy <code>{html.escape(choice.policy)}</code>: "
+        f"{html.escape(choice.rationale)}.</p>"
+        '<table><thead><tr><th scope="col">cutoff</th>'
+        + head
+        + f'</tr></thead><tbody><tr><th scope="row">{r.cutoff:.3f}</th>'
+        + cells
+        + "</tr></tbody></table>"
+    )
+
+
 def _html_risk_list(
     rows: list[ScoredImage],
     candidate_dir: Path,
@@ -214,6 +235,7 @@ def render_report_html(
     *,
     html_path: Path,
     sweep_step: float = 0.05,
+    choice: ThresholdChoice | None = None,
     indy_image_dir: Path = INDY_IMAGE_DIR,
     oxford_image_dir: Path = OXFORD_IMAGE_DIR,
 ) -> str:
@@ -281,6 +303,11 @@ def render_report_html(
         "<h2>Per-breed FPR by cutoff</h2>",
         "<p>Breeds sorted worst-first (highest max negative score).</p>",
         _html_breed_sweep(negatives, thresholds),
+        *(
+            ["<h2>Chosen threshold</h2>", _html_choice(choice)]
+            if choice is not None
+            else []
+        ),
         f"<h2>Highest-scoring negatives (false-positive risks, top {RISK_ROWS})</h2>",
         _html_risk_list(worst_neg, oxford_image_dir, html_dir, show_breed=True),
         f"<h2>Lowest-scoring positives (recognition risks, bottom {RISK_ROWS})</h2>",
@@ -303,6 +330,7 @@ def write_report_html(
     aggregation: Aggregation,
     *,
     sweep_step: float = 0.05,
+    choice: ThresholdChoice | None = None,
     indy_image_dir: Path = INDY_IMAGE_DIR,
     oxford_image_dir: Path = OXFORD_IMAGE_DIR,
 ) -> None:
@@ -316,6 +344,7 @@ def write_report_html(
         aggregation,
         html_path=path,
         sweep_step=sweep_step,
+        choice=choice,
         indy_image_dir=indy_image_dir,
         oxford_image_dir=oxford_image_dir,
     )

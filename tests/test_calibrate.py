@@ -110,6 +110,48 @@ def test_scores_out_writes_csv(
     assert "Per-image scores written" in capsys.readouterr().out
 
 
+def test_no_policy_does_not_choose_a_threshold(
+    fake_data: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calibrate.main(["--out", str(tmp_path / "m.yaml")])
+    assert "Chosen threshold" not in capsys.readouterr().out
+
+
+def test_policy_target_fpr_prints_chosen_threshold(
+    fake_data: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calibrate.main(["--out", str(tmp_path / "m.yaml"), "--policy", "target-fpr"])
+    printed = capsys.readouterr().out
+    assert "Chosen threshold (policy=target-fpr)" in printed
+    assert "look-alike" in printed  # default budget group reaches the rationale
+
+
+def test_policy_youdens_j_prints_chosen_threshold(
+    fake_data: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calibrate.main(["--out", str(tmp_path / "m.yaml"), "--policy", "youdens-j"])
+    assert "Chosen threshold (policy=youdens-j)" in capsys.readouterr().out
+
+
+def test_target_fpr_group_overall_reaches_the_pick(
+    fake_data: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calibrate.main(
+        [
+            "--out",
+            str(tmp_path / "m.yaml"),
+            "--policy",
+            "target-fpr",
+            "--target-fpr-group",
+            "overall",
+            "--target-fpr",
+            "0.1",
+        ]
+    )
+    printed = capsys.readouterr().out
+    assert "FPR(overall) <= 0.100" in printed
+
+
 def test_overask_exits_loudly(fake_data: None, tmp_path: Path) -> None:
     out = tmp_path / "m.yaml"
     with pytest.raises(SystemExit, match="over-ask"):
