@@ -16,7 +16,7 @@ What exists so far against this design:
 - **Automated threshold pick — done (V2).** `scripts/calibration/metrics.py` adds the policy layer of §5's V2: `PickPolicy` (`target-fpr` / `youdens-j` / `equal-error`), `TargetGroup` (`overall` / `look-alike`), `candidate_cutoffs` (a **fine** grid — midpoints between adjacent distinct observed scores plus bracketing endpoints, so the chosen threshold is precise and the `>=` convention stays unambiguous, unlike V1's round display grid), and `pick_threshold`, which scores that grid via `build_sweep` and selects one `SweepRow`: `target-fpr` takes the lowest cutoff (max recall) whose FPR over the chosen group is ≤ the budget; `youdens-j` maximises `recall − FPR(all)`; `equal-error` minimises `|FPR(all) − (1 − recall)|` (ties break toward the higher cutoff = fewer false positives). It returns a `ThresholdChoice` (the chosen row + a human-readable rationale) and raises loudly on empty positives/negatives or a look-alike target with no look-alike negatives — never a NaN-driven silent pick. Both renderers gain an optional `choice` param that adds a **"Chosen threshold"** section after the sweep tables; without `--policy` the output is the unchanged V1 report. The CLI adds `--policy`, `--target-fpr` (default `0.05`), and `--target-fpr-group` (default `look-alike`), all composing with `--manifest`. Covered by `tests/test_calibration_report.py` and `tests/test_calibrate.py`. Measured on the baseline split, `--policy target-fpr` picks cutoff ≈0.72 (FPR(look-alike) ≈0.048, recall 1.0) and the parameter-free policies land at the same ≈0.72 knee — the distributions separate cleanly enough that all three agree. **V2 only reports the chosen threshold; it does not freeze an artifact** (that is V3).
 - **Frozen calibration artifact — done (V3).** `scripts/calibration/artifact.py` writes the frozen output of §5's V3 (contents per §"V3 — the calibration artifact"): a `CalibrationArtifact` serialized as a human-readable `calibration.yaml` (operative fields + provenance + the V1 curve) plus a companion `<stem>.gallery.npy` holding the **raw** gallery vectors row-aligned to `gallery.images` (raw so `decision.Gallery` keeps L2-normalizing). A `sha256` `gallery_fingerprint` over the raw vectors is asserted at load (`load_artifact`), so a vector/threshold mismatch is a loud `SplitConfigError`, not a silently-wrong verdict — as is a `format_version` drift. Writing it runs `pick_threshold` under **both** aggregations and records the `aggregation_comparison`; the winner is chosen **FPR-first** (lowest `fpr_look_alike` at the chosen threshold, `recall_indy` breaking ties, `max` winning exact ties) and becomes the operative `aggregation`. `gallery.images` carries each gallery photo's `position`/`view` from `mapping.csv` (`load_indy_positions`) so decide can name the best match without it. Covered by `tests/test_artifact.py`. Measured on the baseline split, the artifact freezes threshold ≈0.72 with `winner: max` — at the picked cutoff both aggregations hit FPR(look-alike) ≈0.048, but `max` keeps recall 1.0 vs `mean-top3`'s 0.9, so the recall tiebreak selects it.
 - **CLI — done for V0+V1+V2+V3.** `scripts/calibration/cli.py` is the command (entry point `scripts/calibrate.py`, generation folded in, per §4): generation flags, a `--seed`/`--random-seed` group, `--manifest` replay (mutually exclusive with generation flags), `--generate-only`, plus the scoring options `--aggregation {max,mean-top3}`, `--scores-out`, `--sweep-step` (the V1 cutoff granularity), the V2 pick options `--policy {target-fpr,youdens-j,equal-error}`, `--target-fpr`, `--target-fpr-group {overall,look-alike}`, and the V3 `--artifact` (all composing with `--manifest`). `--artifact` freezes the artifact and **requires `--policy`** (an artifact must freeze a chosen threshold); its bare flag auto-names into `data/artifacts/` (or takes an explicit path), parallel to `--html` into `data/reports/` and the manifest into `data/splits/`. The operative aggregation is the auto-selected winner, so `--aggregation` only affects the printed text/HTML report, not the artifact. A normal run generates + saves the manifest **and** scores it, printing the V0 distributions + V1 sweep (+ the V2 chosen threshold when `--policy` is given, + the V3 artifact when `--artifact` is given); the `--manifest` replay path scores too; `--generate-only` stops after writing the manifest. `test` is never read. Covered by `tests/test_calibrate.py`.
-- **Not yet started:** the separate `evaluate.py` (reads `test` + a frozen artifact, reports honest numbers at the frozen threshold). `leave_one_out` is unimplemented (the `strategy` string is stored; only `three_way` is generated).
+- **Not yet started:** the separate `evaluate.py` (reads `test` + a frozen artifact, reports honest numbers at the frozen threshold) — now **specified in full in §7** (inputs, the disjointness guard, the confusion-matrix/drift report, the shared-rendering-primitives refactor, and the E0→E2 staging), pending implementation. `leave_one_out` is unimplemented (the `strategy` string is stored; only `three_way` is generated).
 
 ## 1. The decision (the live path)
 
@@ -43,7 +43,7 @@ The threshold lives in the gap between them. The size and contents of any overla
 
 ### Metrics
 
-- **Primary: false-positive rate on look-alikes** — non-Indy cats wrongly scored as Indy, over all non-Indy cats, with the look-alikes (long-haired breeds) called out specifically. **Report this honestly:** under the breed-stratified split the look-alike *breeds* appear on both sides (image-disjoint, breed-overlapping — see §3), so this number measures FPR on *look-alike breeds that were also seen during calibration*. It is **not** the unseen-breed generalization test the handoff's "real exam" language implies — that role belongs to the future, fully held-out NFC slice (§7). The report (and later `evaluate.py`) labels the metric accordingly so it is never read as stronger than it is.
+- **Primary: false-positive rate on look-alikes** — non-Indy cats wrongly scored as Indy, over all non-Indy cats, with the look-alikes (long-haired breeds) called out specifically. **Report this honestly:** under the breed-stratified split the look-alike *breeds* appear on both sides (image-disjoint, breed-overlapping — see §3), so this number measures FPR on *look-alike breeds that were also seen during calibration*. It is **not** the unseen-breed generalization test the handoff's "real exam" language implies — that role belongs to the future, fully held-out NFC slice (§8). The report (and later `evaluate.py`) labels the metric accordingly so it is never read as stronger than it is.
 - **Tracked alongside: recall on Indy** — to confirm that fewer false positives are not bought by missing Indy himself.
 - **Breakdown:** the report breaks negatives down **by breed group (look-alike vs. easy) and per individual breed**. Per-breed numbers show exactly which breeds drive the false-positive risk (and confirm or refute the "Maine Coon / Ragdoll / Birman are the hard ones" hypothesis), rather than hiding it inside an aggregate.
 
@@ -90,7 +90,7 @@ The manifest references only images that are actually embedded (rows in `metadat
 
 ### Indy vs. Oxford selection
 
-- **Indy** is always materialized (35 photos, meaningful names). The automated selector is random-but-seeded; an optional `prefer` knob can bias the gallery toward `head_visible` / `tail_visible` photos (text fields in `mapping.csv`), since those carry the most identifying information. **`prefer` is off for the baseline.** Because the test split is drawn first (§"Test split first"), skimming the head/tail-visible photos into the gallery leaves the *calibration positives* with the weaker photos — distorting the very positive distribution V0 exists to measure. So biased-gallery is strictly a later, labelled experiment (§7); the default run keeps selection unbiased. A **manual** path — hand-edit the YAML, optionally aided by the existing `data_review` app surfacing `mapping.csv` attributes — produces a manifest in the same format. Hand-picked-vs-random gallery is itself a measurable experiment.
+- **Indy** is always materialized (35 photos, meaningful names). The automated selector is random-but-seeded; an optional `prefer` knob can bias the gallery toward `head_visible` / `tail_visible` photos (text fields in `mapping.csv`), since those carry the most identifying information. **`prefer` is off for the baseline.** Because the test split is drawn first (§"Test split first"), skimming the head/tail-visible photos into the gallery leaves the *calibration positives* with the weaker photos — distorting the very positive distribution V0 exists to measure. So biased-gallery is strictly a later, labelled experiment (§8); the default run keeps selection unbiased. A **manual** path — hand-edit the YAML, optionally aided by the existing `data_review` app surfacing `mapping.csv` attributes — produces a manifest in the same format. Hand-picked-vs-random gallery is itself a measurable experiment.
 - **Oxford** is selected automatically, stratified by breed so each role gets a representative breed mix and the look-alike tail is never lopsided. Manual Oxford picking is deferred — Oxford's breed labels are trustworthy, so "hard look-alikes" = the long-haired breeds, fully automatable; manual selection only becomes relevant for a future community NFC set with unreliable labels.
 
 ## 4. The calibration tool — outside view
@@ -218,11 +218,110 @@ sweep:
 
 ## 6. Boundaries & discipline
 
-- **Calibrate never touches `test`.** A separate, later `evaluate.py` reads the `test` role plus a frozen calibration artifact and reports the honest numbers at the frozen threshold. Calibration uses only `gallery` and `calibration` roles.
+- **Calibrate never touches `test`.** A separate, later `evaluate.py` reads the `test` role plus a frozen calibration artifact and reports the honest numbers at the frozen threshold. Calibration uses only `gallery` and `calibration` roles. The tool is specified in full in §7.
 - **Split discipline** (from the handoff, restated): disjoint at the *image* level (breed-level overlap is fine and desirable); the test exam fixed up front and never used during setup; the test exam must include the look-alike slice.
 - **Core vs. driver:** the scoring/decision logic is UI-agnostic core in `src/indycat/`; the calibrate and (future) evaluate tools and the split generator live in `scripts/`, with the generator factored as a reusable unit (not tangled into calibrate's measurement job) so a standalone generate command or `evaluate.py` can reuse it.
 
-## 7. Open / to revisit
+## 7. The evaluation tool — `evaluate.py`
+
+The mirror of calibrate on the other side of the boundary: where calibrate *explores* the `gallery`/`calibration` split to choose a threshold, evaluate *grades* a frozen threshold against the held-out `test` exam. It is the **only** place the `test` role is ever read, and it makes exactly **one decision rule** — the frozen threshold applied verbatim. No sweep, no policy pick: those choices were already made and frozen into the artifact. This is the first and only time the exam is touched, so its numbers are the honest ones.
+
+### Inputs
+
+Three, each with a single clear source:
+
+- **The frozen artifact** (`load_artifact`, already implemented). The binding contract: it supplies the operative `threshold`, `aggregation`, `comparison` (`>=`), and the **bundled raw gallery vectors + `gallery.images` names**. The gallery comes from *here*, never re-derived from the manifest — that is exactly the binding the `gallery_fingerprint` protects, and `load_artifact` already asserts `format_version` and the fingerprint loudly before evaluate scores anything. The `aggregation` is likewise read from the artifact, **not** exposed as a CLI flag: the threshold is only meaningful under the aggregation that produced it, so letting evaluate score under a different one would be a silent footgun.
+- **The manifest**, for the `test` membership only (`indy_test`, `oxford_test`) — which the artifact deliberately does not carry (§5, "Not in the artifact"). It defaults to `artifact.chosen_by.manifest`; `--manifest` overrides it (to grade a different test set drawn from the *same* gallery).
+- **The embeddings caches** (`load_cached_embeddings`, already in `scripts/_common.py` "for reuse by `evaluate.py`"), to look up the test images' vectors — the same path calibrate uses.
+
+### The disjointness guard
+
+Evaluate asserts that the manifest and the artifact describe the **same experiment**: `set(manifest.indy_gallery) == {img.source_filename for img in artifact.gallery_images}`. Using the artifact's own manifest by default makes this hold automatically (the manifest's own load already asserts `gallery`/`calibration`/`test` are disjoint); the check exists to defend the `--manifest` override path, where pointing at a different-seed manifest could let its `test` set overlap the artifact's gallery — silently inflating recall by self-matching. A mismatch is a loud `SplitConfigError`, consistent with the project's no-silently-wrong-numbers stance.
+
+### What it reuses
+
+The numbers all come from the existing `calibration.metrics` functions, so evaluate's grade **cannot diverge** from calibrate's math:
+
+- Gallery: `decision.Gallery.from_raw(artifact gallery names, raw_vectors)` — the raw vectors from `load_artifact` are already row-aligned, and `from_raw` L2-normalizes.
+- Scoring: `calibration.scoring.score_role` over `indy_test` (positives) and `oxford_test` (negatives, with breeds), under `artifact.aggregation`.
+- Metrics: the frozen threshold is just a **single-element sweep**. `build_sweep(pos, neg, [artifact.threshold])` returns one `SweepRow` carrying `fpr_overall`/`fpr_lookalike`/`fpr_easy` and `recall` at exactly that cutoff; `build_breed_sweep(neg, [artifact.threshold])` gives the per-breed FPR at the cutoff. The NaN→dash convention for an empty look-alike group comes free.
+
+### Honest labeling (carried over from §2)
+
+Under the breed-stratified split the look-alike breeds appear on both sides (image-disjoint, breed-overlapping). So evaluate's `FPR(look-alike)` is measured on **look-alike breeds that were also seen during calibration** — it is *not* the unseen-breed generalization exam the handoff's "real exam" language implies (that role belongs to the future, fully held-out NFC slice, §8). The report labels the metric accordingly, so it is never read as stronger than it is.
+
+### Output (textual + HTML from the start)
+
+Calibrate emits a *curve*; evaluate has a *fixed rule*, so the natural shape is a **confusion matrix plus derived rates**, not a sweep. Illustrative text:
+
+```
+Evaluation: <artifact>  on test set <manifest>
+  Frozen threshold: 0.7213   (aggregation=max, score >= threshold -> Indy)
+  Test positives: 10 Indy photos (held-out; never seen during setup)
+  Test negatives: M Oxford cats, K breeds
+
+Confusion at the frozen threshold:
+               pred Indy   pred not
+  Indy (10)    TP          FN
+  not  (M)     FP          TN
+
+  Recall (Indy):       TP/10
+  FPR (all):           FP/M
+  FPR (look-alike):    ..   [look-alike breeds also seen during calibration —
+                             NOT the unseen-breed exam; see §8]
+  FPR (easy):          ..
+
+Per-breed FPR at the frozen threshold (worst-first)
+
+Generalization (calibration vs test, at the same frozen threshold):
+  metric          calibration   test
+  recall_indy     1.00          ..
+  fpr_look_alike  0.048         ..
+
+False positives (negatives that cleared the bar): score, name, breed, best match
+False negatives (Indy missed):                    score, name, best match
+```
+
+Two parts are unique to evaluate and worth calling out:
+
+- **The generalization / drift table** is free and uniquely enabled by the artifact: it carries `metrics_at_threshold` (the calibration-split numbers at this exact threshold), so test numbers sit beside their calibration counterparts and the *generalization gap* is visible rather than a test number read in isolation.
+- **The error lists invert calibrate's risk lists.** Calibrate shows "highest negatives / lowest positives" as *risks*; evaluate shows the **actual** false positives and false negatives at the frozen cutoff — the real mistakes the frozen rule makes.
+
+**HTML is part of the first stage, not deferred.** A screen reader navigates semantic tables — real `<th scope="col">`/`<th scope="row">` cells, headings to jump between — far better than monospace ASCII, and the confusion matrix, per-breed FPR, and drift table are the *tables themselves*, independent of any images. So evaluate emits both renderings from E0: plain text to stdout (quick feedback) and a self-contained semantic-HTML document via `--html`. The error-list **images** (each misclassified cat beside the gallery photo it best matched) arrive in E1, like calibrate's risk-list figures.
+
+### The HTML rendering refactor
+
+The accessibility-critical markup — the scoped-header `<table>` scaffolding and the `_fmt_html` (NaN→en-dash) helper — currently lives module-private inside `calibration.report_html`, coupled to the calibration report. Evaluate must produce the *same* accessible table shape, and the calibrate/evaluate boundary keeps them as siblings, so before E0 a small **shared rendering-primitives module** is extracted — `calibration.report_common` — holding `_fmt`/`_fmt_html`, a generic scoped-`<table>` builder, and `_figure`/`_rel_src`. Both `report_html.py` and a new `evaluate_report_html.py` build on it. This keeps the screen-reader table semantics in **exactly one place** (they cannot drift between the two reports), mirroring how `metrics.py` already keeps the *numbers* in one place. The alternative — duplicating `_fmt_html` and re-deriving the table HTML in evaluate — is less code now but two copies of the accessibility-critical markup to keep in sync, which the project's screen-reader-first principle argues against.
+
+### CLI & placement
+
+Parallel to calibrate: logic + `main()` in `scripts/calibration/evaluate.py` (built squarely on the calibration package — `manifest`, `scoring`, `metrics`, `artifact`), with a thin `scripts/evaluate.py` shim re-exporting `main`, exactly like `scripts/calibrate.py`.
+
+```
+uv run python scripts/evaluate.py --artifact data/artifacts/<...>.yaml
+    # --manifest   defaults to artifact.chosen_by.manifest; override to grade a
+    #              different test set drawn from the SAME gallery (disjointness-guarded)
+    # --html       bare flag auto-names into data/reports/, or give an explicit path
+    # --scores-out <csv>   per-image test scores joined with provenance (E1)
+```
+
+### Edge cases (all loud)
+
+- `test=0` in the manifest → nothing to grade → hard error (never an empty matrix).
+- `oxford_test` has no look-alike breeds → `FPR(look-alike)` is a dash, not a crash (the `_rate` NaN convention handles it; the label still states what it is).
+- A test image absent from the embeddings cache → already loud via `score_role`.
+- Manifest/artifact gallery mismatch, fingerprint drift, or format-version drift → loud `SplitConfigError`.
+- Only `three_way` is supported; `leave_one_out` has no fixed `test` role.
+
+### Staging
+
+Mirrors calibrate's V0→V3 discipline, each stage validated before the next:
+
+- **E0** — load artifact + manifest test roles, score under the frozen aggregation, and emit the core tables in **both** text and semantic HTML: confusion matrix, headline rates, per-breed FPR at the frozen cutoff, and the calibration-vs-test drift table. Preceded by the `report_common` extraction above. No images yet. This stage alone *is* the deliverable — the honest grade.
+- **E1** — the false-positive / false-negative error lists with embedded crops (reusing `_figure`/`_rel_src`); the `--scores-out` CSV.
+- **E2 (optional)** — anything further (e.g. a gallery dump) only if it earns its place.
+
+## 8. Open / to revisit
 
 Treated as adjustable, decided by measured results rather than assumption:
 
