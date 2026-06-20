@@ -151,6 +151,32 @@ def build_breed_sweep(
     return breeds, fpr_by_breed
 
 
+@dataclass(frozen=True)
+class Confusion:
+    """The confusion matrix at one cutoff (the ``>=`` convention, like the sweep).
+
+    ``tp``/``fn`` partition the positives (Indy), ``fp``/``tn`` the negatives
+    (Oxford): a query is called *Indy* when its score ``>= threshold``. This is
+    evaluate's fixed-rule view -- the actual counts at the frozen threshold -- and
+    is consistent with :func:`build_sweep`'s rates (recall = tp / (tp + fn),
+    FPR(all) = fp / (fp + tn)).
+    """
+
+    tp: int
+    fn: int
+    fp: int
+    tn: int
+
+
+def confusion_at(
+    positives: list[ScoredImage], negatives: list[ScoredImage], threshold: float
+) -> Confusion:
+    """Confusion counts at ``threshold`` (``score >= threshold`` -> Indy)."""
+    tp = sum(1 for s in positives if s.score >= threshold)
+    fp = sum(1 for s in negatives if s.score >= threshold)
+    return Confusion(tp=tp, fn=len(positives) - tp, fp=fp, tn=len(negatives) - fp)
+
+
 def select_risk_rows(
     positives: list[ScoredImage], negatives: list[ScoredImage]
 ) -> tuple[list[ScoredImage], list[ScoredImage]]:
