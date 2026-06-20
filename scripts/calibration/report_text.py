@@ -11,7 +11,6 @@ the per-image scores for offline inspection.
 from __future__ import annotations
 
 import csv
-import math
 from pathlib import Path
 
 from calibration.metrics import (
@@ -26,12 +25,8 @@ from calibration.metrics import (
     summarize,
     sweep_thresholds,
 )
+from calibration.report_common import fmt as _fmt
 from indycat.decision import Aggregation
-
-
-def _fmt(value: float) -> str:
-    """Format a score for the report (NaN -> dash)."""
-    return "  -  " if math.isnan(value) else f"{value:.3f}"
 
 
 def _stats_row(label: str, stats: Stats, width: int) -> str:

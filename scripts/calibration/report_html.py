@@ -13,8 +13,6 @@ from ``calibration.metrics``; this module only renders.
 from __future__ import annotations
 
 import html
-import math
-import os
 from pathlib import Path
 
 from calibration.manifest import INDY_IMAGE_DIR, OXFORD_IMAGE_DIR
@@ -23,6 +21,7 @@ from calibration.metrics import (
     RISK_ROWS,
     ScoredImage,
     Stats,
+    SweepRow,
     ThresholdChoice,
     build_breed_sweep,
     build_sweep,
@@ -30,45 +29,13 @@ from calibration.metrics import (
     summarize,
     sweep_thresholds,
 )
+from calibration.report_common import (
+    HTML_STYLE,
+    figure,
+    fmt_html,
+    scoped_table,
+)
 from indycat.decision import Aggregation
-
-#: Minimal styling -- just enough to lay the two figures of a risk row side by
-#: side and keep tables legible. No JavaScript; semantics carry the report.
-_HTML_STYLE = """
-body { font-family: sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
-table { border-collapse: collapse; margin: 0.5rem 0; }
-th, td { border: 1px solid #ccc; padding: 0.2rem 0.6rem; text-align: right; }
-th[scope="row"], caption { text-align: left; }
-figure { display: inline-block; margin: 0.3rem; vertical-align: top; }
-figure img { max-height: 12rem; max-width: 16rem; }
-figcaption { font-size: 0.85rem; word-break: break-all; max-width: 16rem; }
-ol.risks > li { margin-bottom: 1rem; }
-"""
-
-
-def _fmt_html(value: float) -> str:
-    """Format a score for HTML (NaN -> en dash, no padding)."""
-    return "&ndash;" if math.isnan(value) else f"{value:.3f}"
-
-
-def _rel_src(filename: str, image_dir: Path, html_dir: Path) -> str:
-    """A browser-correct relative ``src`` from the HTML file to an image.
-
-    Relative to the HTML file's own directory (so the report stays portable if the
-    repo moves), with forward slashes regardless of OS.
-    """
-    rel = os.path.relpath(image_dir / filename, html_dir)
-    return rel.replace(os.sep, "/")
-
-
-def _figure(filename: str, image_dir: Path, html_dir: Path) -> str:
-    """One ``<figure>``: the image, with its filename as both ``alt`` and caption."""
-    src = html.escape(_rel_src(filename, image_dir, html_dir))
-    name = html.escape(filename)
-    return (
-        f'<figure><img src="{src}" alt="{name}">'
-        f"<figcaption>{name}</figcaption></figure>"
-    )
 
 
 def _stats_table(rows: list[tuple[str, Stats]], columns: tuple[str, ...]) -> str:
@@ -77,22 +44,15 @@ def _stats_table(rows: list[tuple[str, Stats]], columns: tuple[str, ...]) -> str
     ``columns`` names the ``Stats`` attributes to show (e.g. ``("mean", "p95",
     "max")``); ``n`` is always shown first as an integer count.
     """
-    head = '<th scope="col">n</th>' + "".join(
-        f'<th scope="col">{html.escape(c)}</th>' for c in columns
-    )
-    body = []
-    for label, st in rows:
-        cells = "".join(f"<td>{_fmt_html(getattr(st, c))}</td>" for c in columns)
-        body.append(
-            f'<tr><th scope="row">{html.escape(label)}</th><td>{st.n}</td>{cells}</tr>'
+    headers = ["n", *(html.escape(c) for c in columns)]
+    body = [
+        (
+            html.escape(label),
+            [str(st.n), *(fmt_html(getattr(st, c)) for c in columns)],
         )
-    return (
-        "<table><thead><tr><th></th>"
-        + head
-        + "</tr></thead><tbody>"
-        + "".join(body)
-        + "</tbody></table>"
-    )
+        for label, st in rows
+    ]
+    return scoped_table(headers, body)
 
 
 def _html_overlap(positives: list[ScoredImage], negatives: list[ScoredImage]) -> str:
@@ -101,14 +61,14 @@ def _html_overlap(positives: list[ScoredImage], negatives: list[ScoredImage]) ->
     lowest_pos = min(positives, key=lambda s: s.score)
     highest_neg = max(negatives, key=lambda s: s.score)
     items = [
-        f"Lowest positive {_fmt_html(lowest_pos.score)} "
+        f"Lowest positive {fmt_html(lowest_pos.score)} "
         f"({html.escape(lowest_pos.name)})",
-        f"Highest negative {_fmt_html(highest_neg.score)} "
+        f"Highest negative {fmt_html(highest_neg.score)} "
         f"({html.escape(highest_neg.name)}, {html.escape(str(highest_neg.breed))})",
     ]
     if lowest_pos.score > highest_neg.score:
         gap = lowest_pos.score - highest_neg.score
-        items.append(f"Clean gap of {_fmt_html(gap)} (distributions separate)")
+        items.append(f"Clean gap of {fmt_html(gap)} (distributions separate)")
     else:
         neg_above = sum(1 for s in negatives if s.score >= lowest_pos.score)
         pos_below = sum(1 for s in positives if s.score <= highest_neg.score)
@@ -126,20 +86,29 @@ def _html_per_breed(negatives: list[ScoredImage]) -> str:
         by_breed.setdefault(s.breed or "(unknown)", []).append(s.score)
     rows = [(breed, summarize(scores)) for breed, scores in by_breed.items()]
     rows.sort(key=lambda r: r[1].max, reverse=True)
-    body = []
-    for breed, st in rows:
-        look = "yes" if breed in LOOKALIKE_BREEDS else ""
-        body.append(
-            f'<tr><th scope="row">{html.escape(breed)}</th><td>{st.n}</td>'
-            f"<td>{_fmt_html(st.mean)}</td><td>{_fmt_html(st.p95)}</td>"
-            f"<td>{_fmt_html(st.max)}</td><td>{look}</td></tr>"
+    body = [
+        (
+            html.escape(breed),
+            [
+                str(st.n),
+                fmt_html(st.mean),
+                fmt_html(st.p95),
+                fmt_html(st.max),
+                "yes" if breed in LOOKALIKE_BREEDS else "",
+            ],
         )
-    return (
-        '<table><thead><tr><th></th><th scope="col">n</th>'
-        '<th scope="col">mean</th><th scope="col">p95</th>'
-        '<th scope="col">max</th><th scope="col">look-alike</th></tr></thead>'
-        "<tbody>" + "".join(body) + "</tbody></table>"
-    )
+        for breed, st in rows
+    ]
+    return scoped_table(["n", "mean", "p95", "max", "look-alike"], body)
+
+
+#: Column headers for the FPR/recall sweep tables (also the V2 choice table).
+_SWEEP_COLUMNS = ("FPR (all)", "FPR (look-alike)", "FPR (easy)", "recall (Indy)")
+
+
+def _sweep_cells(r: SweepRow) -> list[str]:
+    """The FPR/recall cells of a sweep row, in ``_SWEEP_COLUMNS`` order."""
+    return [fmt_html(v) for v in (r.fpr_overall, r.fpr_lookalike, r.fpr_easy, r.recall)]
 
 
 def _html_sweep(
@@ -147,57 +116,33 @@ def _html_sweep(
     negatives: list[ScoredImage],
     thresholds: list[float],
 ) -> str:
-    cols = ("FPR (all)", "FPR (look-alike)", "FPR (easy)", "recall (Indy)")
-    head = "".join(f'<th scope="col">{html.escape(c)}</th>' for c in cols)
-    body = []
-    for r in build_sweep(positives, negatives, thresholds):
-        cells = "".join(
-            f"<td>{_fmt_html(v)}</td>"
-            for v in (r.fpr_overall, r.fpr_lookalike, r.fpr_easy, r.recall)
-        )
-        body.append(f'<tr><th scope="row">{r.cutoff:.2f}</th>{cells}</tr>')
-    return (
-        '<table><thead><tr><th scope="col">cutoff</th>'
-        + head
-        + "</tr></thead><tbody>"
-        + "".join(body)
-        + "</tbody></table>"
-    )
+    headers = [html.escape(c) for c in _SWEEP_COLUMNS]
+    body = [
+        (f"{r.cutoff:.2f}", _sweep_cells(r))
+        for r in build_sweep(positives, negatives, thresholds)
+    ]
+    return scoped_table(headers, body, corner="cutoff")
 
 
 def _html_breed_sweep(negatives: list[ScoredImage], thresholds: list[float]) -> str:
     breeds, fpr_by_breed = build_breed_sweep(negatives, thresholds)
-    head = "".join(f'<th scope="col">{t:.2f}</th>' for t in thresholds)
-    body = []
-    for breed in breeds:
-        cells = "".join(f"<td>{_fmt_html(f)}</td>" for f in fpr_by_breed[breed])
-        body.append(f'<tr><th scope="row">{html.escape(breed)}</th>{cells}</tr>')
-    return (
-        '<table><thead><tr><th scope="col">breed</th>'
-        + head
-        + "</tr></thead><tbody>"
-        + "".join(body)
-        + "</tbody></table>"
-    )
+    headers = [f"{t:.2f}" for t in thresholds]
+    body = [
+        (html.escape(breed), [fmt_html(f) for f in fpr_by_breed[breed]])
+        for breed in breeds
+    ]
+    return scoped_table(headers, body, corner="breed")
 
 
 def _html_choice(choice: ThresholdChoice) -> str:
     """The V2 chosen-threshold section: rationale plus a one-row metrics table."""
     r = choice.row
-    cols = ("FPR (all)", "FPR (look-alike)", "FPR (easy)", "recall (Indy)")
-    head = "".join(f'<th scope="col">{html.escape(c)}</th>' for c in cols)
-    cells = "".join(
-        f"<td>{_fmt_html(v)}</td>"
-        for v in (r.fpr_overall, r.fpr_lookalike, r.fpr_easy, r.recall)
-    )
+    headers = [html.escape(c) for c in _SWEEP_COLUMNS]
+    rows = [(f"{r.cutoff:.3f}", _sweep_cells(r))]
+    table = scoped_table(headers, rows, corner="cutoff")
     return (
         f"<p>Policy <code>{html.escape(choice.policy)}</code>: "
-        f"{html.escape(choice.rationale)}.</p>"
-        '<table><thead><tr><th scope="col">cutoff</th>'
-        + head
-        + f'</tr></thead><tbody><tr><th scope="row">{r.cutoff:.3f}</th>'
-        + cells
-        + "</tr></tbody></table>"
+        f"{html.escape(choice.rationale)}.</p>" + table
     )
 
 
@@ -215,11 +160,11 @@ def _html_risk_list(
     """
     items = []
     for s in rows:
-        text = f"{_fmt_html(s.score)} &mdash; {html.escape(s.name)}"
+        text = f"{fmt_html(s.score)} &mdash; {html.escape(s.name)}"
         if show_breed:
             text += f" ({html.escape(str(s.breed))})"
         text += f" &rarr; best match {html.escape(s.best_match)}"
-        figures = _figure(s.name, candidate_dir, html_dir) + _figure(
+        figures = figure(s.name, candidate_dir, html_dir) + figure(
             s.best_match, INDY_IMAGE_DIR, html_dir
         )
         items.append(f"<li><p>{text}</p>{figures}</li>")
@@ -271,7 +216,7 @@ def render_report_html(
         "<head>",
         '<meta charset="utf-8">',
         f"<title>Calibration report: {esc_label}</title>",
-        f"<style>{_HTML_STYLE}</style>",
+        f"<style>{HTML_STYLE}</style>",
         "</head>",
         "<body>",
         "<h1>Calibration report</h1>",
@@ -314,7 +259,7 @@ def render_report_html(
         _html_risk_list(hardest_pos, indy_image_dir, html_dir, show_breed=False),
         "<h2>Gallery</h2>",
         f"<p>{len(gallery_names)} Indy gallery photos.</p>",
-        "".join(_figure(name, indy_image_dir, html_dir) for name in gallery_names),
+        "".join(figure(name, indy_image_dir, html_dir) for name in gallery_names),
         "</body>",
         "</html>",
     ]

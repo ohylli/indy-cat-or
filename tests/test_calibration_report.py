@@ -17,6 +17,7 @@ import pytest
 
 import calibration as cr
 from _common import BASE_METADATA_COLUMNS, load_cached_embeddings
+from calibration import report_common
 from indycat.decision import Gallery
 
 
@@ -434,6 +435,43 @@ def test_write_report_html_roundtrips(tmp_path: Path) -> None:
     )
     assert out.exists()
     assert out.read_text(encoding="utf-8").startswith("<!DOCTYPE html>")
+
+
+# --------------------------------------------------------------------------- #
+# report_common: shared rendering primitives (the evaluate report will reuse)
+# --------------------------------------------------------------------------- #
+
+
+def test_fmt_and_fmt_html_handle_nan_and_finite() -> None:
+    assert report_common.fmt(float("nan")) == "  -  "
+    assert report_common.fmt(0.1234) == "0.123"
+    assert report_common.fmt_html(float("nan")) == "&ndash;"
+    assert report_common.fmt_html(0.1234) == "0.123"
+
+
+def test_scoped_table_empty_corner_is_blank_header() -> None:
+    table = report_common.scoped_table(["a", "b"], [("row1", ["1", "2"])], corner="")
+    # Empty corner -> a blank, unscoped <th>; column headers carry scope="col".
+    assert table.startswith("<table><thead><tr><th></th>")
+    assert '<th scope="col">a</th><th scope="col">b</th>' in table
+    # Body row: a scope="row" header then the cells, in order, as <td>.
+    assert '<tbody><tr><th scope="row">row1</th><td>1</td><td>2</td></tr></tbody>' in (
+        table
+    )
+
+
+def test_scoped_table_labelled_corner_gets_col_scope() -> None:
+    table = report_common.scoped_table(["x"], [("r", ["v"])], corner="cutoff")
+    # A non-empty corner labels the row-header column with its own scope="col".
+    assert '<tr><th scope="col">cutoff</th><th scope="col">x</th>' in table
+
+
+def test_scoped_table_does_not_escape_pre_rendered_cells() -> None:
+    # Cells are trusted HTML (formatter output / entities); the builder must not
+    # double-escape them.
+    table = report_common.scoped_table(["c"], [("r", ["&ndash;"])])
+    assert "<td>&ndash;</td>" in table
+    assert "&amp;ndash;" not in table
 
 
 # --------------------------------------------------------------------------- #
