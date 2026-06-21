@@ -15,6 +15,7 @@ import math
 import os
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Protocol
 
 #: Minimal styling -- just enough to lay two figures of a risk row side by side
 #: and keep the scoped-header tables legible. No JavaScript; semantics carry the
@@ -59,6 +60,53 @@ def figure(filename: str, image_dir: Path, html_dir: Path) -> str:
         f'<figure><img src="{src}" alt="{name}">'
         f"<figcaption>{name}</figcaption></figure>"
     )
+
+
+class ScoredRow(Protocol):
+    """The shape :func:`figure_list` needs of a scored image (duck-typed).
+
+    Kept as a local ``Protocol`` so this primitives module stays decoupled from
+    :mod:`calibration.metrics` (whose frozen ``ScoredImage`` satisfies it). Members
+    are read-only properties so a frozen dataclass's read-only fields match.
+    """
+
+    @property
+    def score(self) -> float: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def best_match(self) -> str: ...
+    @property
+    def breed(self) -> str | None: ...
+
+
+def figure_list(
+    rows: Sequence[ScoredRow],
+    candidate_dir: Path,
+    best_match_dir: Path,
+    html_dir: Path,
+    *,
+    show_breed: bool,
+) -> str:
+    """An ordered list of scored rows: a text line plus candidate + best-match figures.
+
+    Shared by calibrate's risk lists and evaluate's error lists so the figure-row
+    markup (and the screen-reader caption/alt text inside :func:`figure`) lives in
+    one place. The candidate image comes from ``candidate_dir``; its ``best_match``
+    from ``best_match_dir`` (always the Indy gallery dir). ``show_breed`` appends
+    the breed to the text line (negatives have one, positives do not).
+    """
+    items = []
+    for s in rows:
+        text = f"{fmt_html(s.score)} &mdash; {html.escape(s.name)}"
+        if show_breed:
+            text += f" ({html.escape(str(s.breed))})"
+        text += f" &rarr; best match {html.escape(s.best_match)}"
+        figures = figure(s.name, candidate_dir, html_dir) + figure(
+            s.best_match, best_match_dir, html_dir
+        )
+        items.append(f"<li><p>{text}</p>{figures}</li>")
+    return '<ol class="risks">' + "".join(items) + "</ol>"
 
 
 def scoped_table(

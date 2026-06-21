@@ -10,6 +10,7 @@ cache, and the text/HTML renderers' section/table substrings (mirroring
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -23,14 +24,14 @@ from calibration.artifact import (
     MetricsAtThreshold,
 )
 from calibration.evaluate_report_html import render_report_html
-from calibration.evaluate_report_text import build_report
+from calibration.evaluate_report_text import build_report, write_scores_csv
 from calibration.manifest import (
     GenerationParams,
     OxfordRecord,
     SplitConfigError,
     SplitManifest,
 )
-from calibration.metrics import ScoredImage, confusion_at
+from calibration.metrics import ScoredImage, confusion_at, select_error_rows
 
 GALLERY = ["g0.jpeg", "g1.jpeg"]
 INDY_TEST = ["t0.jpeg", "t1.jpeg"]
@@ -253,10 +254,15 @@ def test_text_report_has_all_sections() -> None:
     assert "recall_indy" in report  # a drift-table row
 
 
-def test_html_report_has_scoped_tables_and_note() -> None:
+def test_html_report_has_scoped_tables_and_note(tmp_path: Path) -> None:
     positives, negatives = _scored()
     document = render_report_html(
-        "art.yaml", "m.yaml", make_artifact(), positives, negatives
+        "art.yaml",
+        "m.yaml",
+        make_artifact(),
+        positives,
+        negatives,
+        html_path=tmp_path / "eval.html",
     )
     assert "<h2>Confusion at the frozen threshold</h2>" in document
     assert "<h2>Generalization (calibration vs test)</h2>" in document
@@ -265,3 +271,96 @@ def test_html_report_has_scoped_tables_and_note() -> None:
     assert '<th scope="row">' in document
     assert "NOT the unseen-breed exam" in document  # honest labeling
     assert "\\" not in document  # no backslash paths even on Windows
+
+
+# --------------------------------------------------------------------------- #
+# E1: error lists + scores CSV
+# --------------------------------------------------------------------------- #
+
+
+def test_select_error_rows_partitions_at_threshold() -> None:
+    positives = [
+        ScoredImage("p_hi.jpeg", 0.9, "g", None),
+        ScoredImage("p_lo.jpeg", 0.3, "g", None),  # false negative
+    ]
+    negatives = [
+        ScoredImage("Persian_5.jpg", 0.7, "g", "Persian"),  # false positive
+        ScoredImage("Ragdoll_5.jpg", 0.6, "g", "Ragdoll"),  # false positive
+        ScoredImage("Beagle_5.jpg", 0.2, "g", "Beagle"),
+    ]
+    false_pos, false_neg = select_error_rows(positives, negatives, 0.5)
+    # FP = negatives >= threshold, highest first; FN = positives < threshold.
+    assert [s.name for s in false_pos] == ["Persian_5.jpg", "Ragdoll_5.jpg"]
+    assert [s.name for s in false_neg] == ["p_lo.jpeg"]
+
+
+def test_text_report_has_error_lists() -> None:
+    positives, negatives = _scored()
+    # At threshold 0.5: t1.jpeg (0.4) is a false negative, Persian_5.jpg (0.6) a FP.
+    report = build_report("art.yaml", "m.yaml", make_artifact(), positives, negatives)
+    assert "False positives (negatives that cleared the bar):" in report
+    assert "False negatives (Indy missed):" in report
+    assert "Persian_5.jpg" in report  # the false positive is listed
+    assert "t1.jpeg" in report  # the false negative is listed
+
+
+def test_html_report_has_error_list_figures(tmp_path: Path) -> None:
+    positives, negatives = _scored()
+    document = render_report_html(
+        "art.yaml",
+        "m.yaml",
+        make_artifact(),
+        positives,
+        negatives,
+        html_path=tmp_path / "eval.html",
+    )
+    assert "<h2>False positives (negatives that cleared the bar)</h2>" in document
+    assert "<h2>False negatives (Indy missed)</h2>" in document
+    assert 'class="risks"' in document
+    assert "<figure>" in document
+    assert 'alt="Persian_5.jpg"' in document  # the FP crop is embedded
+    assert "\\" not in document  # forward-slash src even on Windows
+
+
+def test_write_scores_csv_has_verdict_column(tmp_path: Path) -> None:
+    positives, negatives = _scored()
+    out = tmp_path / "scores.csv"
+    write_scores_csv(out, positives, negatives, 0.5)
+    rows = list(csv.reader(out.read_text(encoding="utf-8").splitlines()))
+    assert rows[0] == [
+        "role",
+        "source_filename",
+        "score",
+        "verdict",
+        "best_match",
+        "breed",
+    ]
+    by_name = {r[1]: r for r in rows[1:]}
+    assert by_name["Persian_5.jpg"][3] == "Indy"  # 0.6 >= 0.5
+    assert by_name["t1.jpeg"][3] == "not"  # 0.4 < 0.5
+    assert by_name["Persian_5.jpg"][5] == "Persian"  # breed provenance
+    assert by_name["t0.jpeg"][5] == ""  # positives carry no breed
+
+
+def test_main_end_to_end_writes_scores_csv(
+    fake_cache: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    art = make_artifact()
+    manifest_file = tmp_path / "m.yaml"
+    manifest_file.write_text("placeholder", encoding="utf-8")
+    monkeypatch.setattr(evaluate, "load_artifact", lambda p: (art, raw_gallery()))
+    monkeypatch.setattr(evaluate, "load_manifest", lambda p: make_manifest())
+    scores_out = tmp_path / "scores.csv"
+    evaluate.main(
+        [
+            "--artifact",
+            str(tmp_path / "a.yaml"),
+            "--manifest",
+            str(manifest_file),
+            "--scores-out",
+            str(scores_out),
+        ]
+    )
+    assert scores_out.exists()
+    header = scores_out.read_text(encoding="utf-8").splitlines()[0]
+    assert "verdict" in header

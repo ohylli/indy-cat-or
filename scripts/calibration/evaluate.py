@@ -41,7 +41,7 @@ from numpy.typing import NDArray
 from _common import load_cached_embeddings
 from calibration.artifact import CalibrationArtifact, load_artifact
 from calibration.evaluate_report_html import write_report_html
-from calibration.evaluate_report_text import build_report
+from calibration.evaluate_report_text import build_report, write_scores_csv
 from calibration.manifest import (
     INDY_EMBEDDINGS,
     INDY_METADATA,
@@ -93,6 +93,7 @@ def run_evaluation(
     artifact_label: str,
     manifest_label: str,
     html_out: Path | None,
+    scores_out: Path | None = None,
 ) -> None:
     """Score the ``test`` roles against the frozen gallery and print the grade.
 
@@ -127,6 +128,9 @@ def run_evaluation(
 
     print()
     print(build_report(artifact_label, manifest_label, artifact, positives, negatives))
+    if scores_out is not None:
+        write_scores_csv(scores_out, positives, negatives, artifact.threshold)
+        print(f"\nPer-image scores written to {scores_out}")
     if html_out is not None:
         write_report_html(
             html_out, artifact_label, manifest_label, artifact, positives, negatives
@@ -159,6 +163,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="also write a semantic-HTML report; bare flag auto-names into "
         "data/reports/, or pass an explicit path.",
     )
+    parser.add_argument(
+        "--scores-out",
+        default=None,
+        help="optional CSV of per-image test scores joined with provenance and the "
+        "frozen verdict.",
+    )
     return parser
 
 
@@ -189,6 +199,8 @@ def main(argv: list[str] | None = None) -> None:
         else:
             html_out = Path(args.html)
 
+        scores_out = Path(args.scores_out) if args.scores_out is not None else None
+
         run_evaluation(
             artifact,
             raw_vectors,
@@ -196,6 +208,7 @@ def main(argv: list[str] | None = None) -> None:
             str(artifact_path),
             str(manifest_path),
             html_out,
+            scores_out,
         )
     except SplitConfigError as err:
         raise SystemExit(str(err)) from err

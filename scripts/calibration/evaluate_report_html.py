@@ -17,13 +17,20 @@ from pathlib import Path
 
 from calibration.artifact import CalibrationArtifact
 from calibration.evaluate_report_text import LOOKALIKE_NOTE
+from calibration.manifest import INDY_IMAGE_DIR, OXFORD_IMAGE_DIR
 from calibration.metrics import (
     ScoredImage,
     build_breed_sweep,
     build_sweep,
     confusion_at,
+    select_error_rows,
 )
-from calibration.report_common import HTML_STYLE, fmt_html, scoped_table
+from calibration.report_common import (
+    HTML_STYLE,
+    figure_list,
+    fmt_html,
+    scoped_table,
+)
 
 
 def _html_confusion(
@@ -78,19 +85,70 @@ def _html_drift(
     return scoped_table(["calibration", "test"], body, corner="metric")
 
 
+def _html_error_lists(
+    positives: list[ScoredImage],
+    negatives: list[ScoredImage],
+    threshold: float,
+    html_dir: Path,
+    indy_image_dir: Path,
+    oxford_image_dir: Path,
+) -> list[str]:
+    """The E1 error lists: the actual mistakes at the frozen cutoff, with crops.
+
+    Inverts calibrate's risk lists -- false positives (negatives that cleared the
+    bar) and false negatives (Indy missed), each candidate beside the gallery photo
+    it best matched, via the shared :func:`figure_list`. Empty lists render a
+    "None" paragraph rather than an empty ``<ol>``.
+    """
+    false_pos, false_neg = select_error_rows(positives, negatives, threshold)
+    parts = ["<h2>False positives (negatives that cleared the bar)</h2>"]
+    if false_pos:
+        parts.append(
+            f"<p>{len(false_pos)} negative(s) scored at or above the frozen "
+            "threshold.</p>"
+        )
+        parts.append(
+            figure_list(
+                false_pos, oxford_image_dir, indy_image_dir, html_dir, show_breed=True
+            )
+        )
+    else:
+        parts.append("<p>None: no negative cleared the bar.</p>")
+    parts.append("<h2>False negatives (Indy missed)</h2>")
+    if false_neg:
+        parts.append(
+            f"<p>{len(false_neg)} Indy photo(s) scored below the frozen threshold.</p>"
+        )
+        parts.append(
+            figure_list(
+                false_neg, indy_image_dir, indy_image_dir, html_dir, show_breed=False
+            )
+        )
+    else:
+        parts.append("<p>None: every Indy photo cleared the bar.</p>")
+    return parts
+
+
 def render_report_html(
     artifact_label: str,
     manifest_label: str,
     artifact: CalibrationArtifact,
     positives: list[ScoredImage],
     negatives: list[ScoredImage],
+    *,
+    html_path: Path,
+    indy_image_dir: Path = INDY_IMAGE_DIR,
+    oxford_image_dir: Path = OXFORD_IMAGE_DIR,
 ) -> str:
     """Render the evaluation report as a self-contained semantic HTML document.
 
     Confusion matrix, headline rates, per-breed FPR at the frozen cutoff, and the
     calibration-vs-test drift table -- the same sections as the text report, each
-    a scoped-header ``<table>``. No images in E0.
+    a scoped-header ``<table>`` -- followed by the E1 error lists, which embed the
+    actual misclassified cats beside the gallery photo each best matched. Image
+    ``src`` paths are relative to ``html_path`` so the file is portable.
     """
+    html_dir = html_path.parent
     breeds = len({s.breed for s in negatives})
     esc_artifact = html.escape(artifact_label)
     esc_manifest = html.escape(manifest_label)
@@ -126,6 +184,14 @@ def render_report_html(
         "<p>Each metric at the same frozen threshold, so the generalization gap "
         "is visible rather than a test number read in isolation.</p>",
         _html_drift(artifact, positives, negatives),
+        *_html_error_lists(
+            positives,
+            negatives,
+            artifact.threshold,
+            html_dir,
+            indy_image_dir,
+            oxford_image_dir,
+        ),
         "</body>",
         "</html>",
     ]
@@ -143,6 +209,11 @@ def write_report_html(
     """Render the HTML evaluation report and write it to ``path`` (parents made)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     document = render_report_html(
-        artifact_label, manifest_label, artifact, positives, negatives
+        artifact_label,
+        manifest_label,
+        artifact,
+        positives,
+        negatives,
+        html_path=path,
     )
     path.write_text(document, encoding="utf-8")

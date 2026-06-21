@@ -32,6 +32,7 @@ from calibration.metrics import (
 from calibration.report_common import (
     HTML_STYLE,
     figure,
+    figure_list,
     fmt_html,
     scoped_table,
 )
@@ -156,19 +157,13 @@ def _html_risk_list(
     """An ordered list of risk rows: a text line plus candidate + best-match figures.
 
     The candidate image comes from ``candidate_dir``; its ``best_match`` is always
-    a gallery (Indy) photo, so that figure always uses the Indy image dir.
+    a gallery (Indy) photo, so that figure always uses the Indy image dir. Thin
+    wrapper over the shared :func:`figure_list` so calibrate's risk lists and
+    evaluate's error lists render identical markup.
     """
-    items = []
-    for s in rows:
-        text = f"{fmt_html(s.score)} &mdash; {html.escape(s.name)}"
-        if show_breed:
-            text += f" ({html.escape(str(s.breed))})"
-        text += f" &rarr; best match {html.escape(s.best_match)}"
-        figures = figure(s.name, candidate_dir, html_dir) + figure(
-            s.best_match, INDY_IMAGE_DIR, html_dir
-        )
-        items.append(f"<li><p>{text}</p>{figures}</li>")
-    return '<ol class="risks">' + "".join(items) + "</ol>"
+    return figure_list(
+        rows, candidate_dir, INDY_IMAGE_DIR, html_dir, show_breed=show_breed
+    )
 
 
 def render_report_html(

@@ -191,6 +191,30 @@ def select_risk_rows(
     return worst_neg, hardest_pos
 
 
+def select_error_rows(
+    positives: list[ScoredImage], negatives: list[ScoredImage], threshold: float
+) -> tuple[list[ScoredImage], list[ScoredImage]]:
+    """The two error lists at the frozen cutoff: ``(false_positives, false_negatives)``.
+
+    False positives are negatives that cleared the bar (``score >= threshold``),
+    worst (highest) first; false negatives are positives that missed it
+    (``score < threshold``), worst (lowest) first -- the same ``>=`` convention as
+    :func:`confusion_at`/:func:`build_sweep`. Unlike calibrate's risk lists these
+    are the *actual* mistakes at the frozen rule (not predicted risks), so they are
+    **not** capped at ``RISK_ROWS`` -- every error is shown (no silent truncation;
+    the FPR is low enough that the lists stay short).
+    """
+    false_pos = sorted(
+        (s for s in negatives if s.score >= threshold),
+        key=lambda s: s.score,
+        reverse=True,
+    )
+    false_neg = sorted(
+        (s for s in positives if s.score < threshold), key=lambda s: s.score
+    )
+    return false_pos, false_neg
+
+
 # --------------------------------------------------------------------------- #
 # Threshold pick (V2: an explicit policy chooses one cutoff off the curve)
 # --------------------------------------------------------------------------- #

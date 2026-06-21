@@ -11,12 +11,16 @@ math); this module only formats it.
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+
 from calibration.artifact import CalibrationArtifact
 from calibration.metrics import (
     ScoredImage,
     build_breed_sweep,
     build_sweep,
     confusion_at,
+    select_error_rows,
 )
 from calibration.report_common import fmt as _fmt
 
@@ -100,6 +104,82 @@ def _drift_section(
     return lines
 
 
+def _error_lists_section(
+    positives: list[ScoredImage], negatives: list[ScoredImage], threshold: float
+) -> list[str]:
+    """The actual mistakes at the frozen cutoff (E1): false positives, then negatives.
+
+    Inverts calibrate's *risk* lists -- these are the real errors the frozen rule
+    makes, uncapped (every one shown). The HTML report adds the crops; the text
+    lines mirror calibrate's ``_risk_sections`` format so a screen reader gets the
+    error inventory without images.
+    """
+    false_pos, false_neg = select_error_rows(positives, negatives, threshold)
+    lines = ["", "False positives (negatives that cleared the bar):"]
+    if false_pos:
+        for s in false_pos:
+            lines.append(
+                f"  {_fmt(s.score)}  {s.name}  ({s.breed})  "
+                f"-> best match {s.best_match}"
+            )
+    else:
+        lines.append("  (none)")
+    lines += ["", "False negatives (Indy missed):"]
+    if false_neg:
+        for s in false_neg:
+            lines.append(f"  {_fmt(s.score)}  {s.name}  -> best match {s.best_match}")
+    else:
+        lines.append("  (none)")
+    return lines
+
+
+def write_scores_csv(
+    path: Path,
+    positives: list[ScoredImage],
+    negatives: list[ScoredImage],
+    threshold: float,
+) -> None:
+    """Write per-image test scores joined with provenance + the frozen verdict (E1).
+
+    Parallel to calibrate's ``write_scores_csv`` but with a ``verdict`` column
+    unique to evaluate (the threshold is fixed here): ``Indy`` when ``score >=
+    threshold`` else ``not``. Negatives first (worst false-positive risk on top),
+    then positives (hardest to recognise on top), so the rows that matter lead.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def verdict(score: float) -> str:
+        return "Indy" if score >= threshold else "not"
+
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["role", "source_filename", "score", "verdict", "best_match", "breed"]
+        )
+        for s in sorted(negatives, key=lambda s: s.score, reverse=True):
+            writer.writerow(
+                [
+                    "negative",
+                    s.name,
+                    f"{s.score:.6f}",
+                    verdict(s.score),
+                    s.best_match,
+                    s.breed,
+                ]
+            )
+        for s in sorted(positives, key=lambda s: s.score):
+            writer.writerow(
+                [
+                    "positive",
+                    s.name,
+                    f"{s.score:.6f}",
+                    verdict(s.score),
+                    s.best_match,
+                    "",
+                ]
+            )
+
+
 def build_report(
     artifact_label: str,
     manifest_label: str,
@@ -129,5 +209,6 @@ def build_report(
         *_rates_section(positives, negatives, artifact.threshold),
         *_per_breed_section(negatives, artifact.threshold),
         *_drift_section(artifact, positives, negatives),
+        *_error_lists_section(positives, negatives, artifact.threshold),
     ]
     return "\n".join([*header, *sections])
