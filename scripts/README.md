@@ -21,3 +21,17 @@ shared helpers in `common.py`) behind a thin entry point. Run:
 ```powershell
 uv run streamlit run scripts/data_review/data_review.py
 ```
+
+## `predict_app/` — Streamlit "Is it Indy?" app
+
+The deliverable UI: upload a photo and get a text-first verdict — is this the cat
+Indy, or not — with the detection confidence, crop, closest gallery match, and the
+score-vs-threshold margin. The recognition logic lives in the streamlit-free
+`predict.py` (`classify` composes detect→crop→embed→score and returns plain data);
+`app.py` is the thin Streamlit layer. The live gallery and threshold come from a
+frozen calibration artifact in `data/artifacts/` — produce one with
+`scripts/calibrate.py` first. Run:
+
+```powershell
+uv run streamlit run scripts/predict_app/app.py
+```
