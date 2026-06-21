@@ -8,7 +8,7 @@ These import `indycat`; the core never imports from here. Run them inside the
 managed environment, e.g.:
 
 ```powershell
-uv run python scripts/build_gallery.py
+uv run python scripts/build_indy_gallery.py
 ```
 
 ## `data_review/` — Streamlit data-review app

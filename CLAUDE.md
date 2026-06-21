@@ -4,17 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Early implementation. The first two pipeline stages exist, and both galleries (positives + negatives) are built:
+All four pipeline stages exist, both galleries (positives + negatives) are built, and the stage-1 baseline calibration + evaluation tooling is done. The stage-by-stage record (V0→V3 calibration, E0→E1 evaluation, what each measured) lives in `docs/calibration_design.md`'s Status section — consult it rather than duplicating it here.
 
 - **Detect & crop** — `src/indycat/detection.py`: `CatDetector` takes an opened PIL image (callers own I/O), and `detect_and_crop` composes detect+crop into the shared pipeline prefix. `scripts/detect_indy_gallery.py` drives it over the Indy photos as a textual sanity-check tool; `tests/test_detection.py` covers it. Measured on the 35 photos, yolo11n missed 8 cats and yolo11m 2, so **yolo11x is the default detector**.
 - **Embed** — `src/indycat/embedding.py`: `Embedder` wraps a frozen DINOv2 (base) via HF `transformers`; `embed`/`embed_batch` return **raw, un-normalized** float32 vectors (normalization is deferred to decide). `tests/test_embedding.py` covers it. `scripts/build_indy_gallery.py` is the real gallery producer — it detects on the fly (does **not** depend on the sanity-check script) and writes `data/embeddings/indy/embeddings.npy` row-aligned with `metadata.csv`.
 - **Negatives gallery** — `scripts/build_oxford_negatives.py` produces the calibration/eval negatives from Oxford-IIIT Pet. torchvision is used for download+md5 only; iteration is over `annotations/list.txt` (species 1 → **all 2371 cats across both paper splits**, not one `OxfordIIITPet` split). It re-detects with the same YOLO (Oxford's shipped head-only boxes are **ignored**, keeping positives/negatives on identical footing), keeps the top crop per image, and writes `data/embeddings/oxford/{embeddings.npy,metadata.csv}` in the same format as Indy plus a `breed` column. Flags `--download-only`, `--no-detect`, `--limit` mirror the toggles; a `catalog.csv` (every cat image → breed) is written to `images/oxford-iiit-pet/` beside the data, like Indy's `mapping.csv`. Full run measured **103/2371 no-cat misses (~4.3%)** with yolo11x; misses are not embedded (recoverable as catalog minus metadata `source_filename`).
-- Shared script helpers live in `scripts/_common.py`: `load_image`, `iter_images`, and the embedding/metadata helpers both gallery builders share (`embed_in_batches`, `GalleryRow`, `BASE_METADATA_COLUMNS`, `base_metadata_cells`).
+- **Decide** — `src/indycat/decision.py`: the UI-agnostic scoring core (`l2_normalize`, a `Gallery` that L2-normalizes the raw stored vectors on construction, `aggregate` with `max` default / `mean-top3`, and `score`/`score_many` returning a `Match`). Pure numpy, no I/O; choosing the threshold is calibration's job, not this module's. `tests/test_decision.py` covers it.
+- **Calibration & evaluation** — `scripts/calibration/` is the package implementing the decide-stage tooling of `docs/calibration_design.md`: `manifest.py` (reproducible split generation/load), `scoring.py` (role scoring over `indycat.decision`), `metrics.py` (pure measurement — distributions, threshold sweep, policy pick, confusion, risk/error lists), `artifact.py` (the frozen `calibration.yaml` + companion raw-vector `.npy`), `evaluate.py` (the honest held-out grade), and the renderers (`report_text`/`report_html`, `evaluate_report_text`/`evaluate_report_html`, with screen-reader table/figure markup shared via `report_common.py`). Thin shims `scripts/calibrate.py` and `scripts/evaluate.py` re-export the `main()`s. Covered by `tests/test_split_manifest.py`, `test_calibration_report.py`, `test_calibrate.py`, `test_artifact.py`, `test_evaluate.py`. The CLI surface, artifact format, and per-stage measured results are all documented in the design doc — read it rather than re-deriving from flags.
+- Shared script helpers live in `scripts/_common.py`: `load_image`, `iter_images`, the embedding/metadata helpers both gallery builders share (`embed_in_batches`, `GalleryRow`, `BASE_METADATA_COLUMNS`, `base_metadata_cells`), and `load_cached_embeddings` (the cache reader, loud on row-count drift, used by calibrate/evaluate).
 - **Data review app** — `scripts/data_review/` is a Streamlit app for inspecting the data (`uv run streamlit run scripts/data_review/data_review.py`). `data_review.py` is the entry point with a sidebar view switcher; the views live in their own modules: `mapping.py` renders `images/indy/mapping.csv` two ways — a heading-led accessible "Rows" layout and the literal `st.dataframe` "Data grid", kept side by side so the screen-reader difference is felt directly; `crops.py` ("Crop review") shows each detect-and-crop result (original beside crop with detection metrics) from `data/crops/indy/detections.csv`; `misses.py` ("Oxford detect misses") shows the Oxford cats the detector failed to find (catalog minus embedding metadata) as a paginated image grid. `common.py` holds shared paths and `static/`-mirror serving (`sync_static_images`/`static_url`) — images are served via Streamlit static serving at `app/static/<file>` (see `.streamlit/config.toml`) rather than inline base64 a screen reader would read out in full.
 
 torch is installed with CUDA from the pytorch-cu128 index (PyPI's Windows wheel
-is CPU-only — keep the `tool.uv` index pinning); GPU verified working. The
-**decide stage** implementation is in progress see `docs/calibration_design.md`.
+is CPU-only — keep the `tool.uv` index pinning); GPU verified working. Remaining
+decide-stage work is tracked in `docs/calibration_design.md` (notably the
+optional `leave_one_out` strategy and the held-out NFC look-alike slice).
 
 ## Tooling & commands
 
@@ -32,7 +35,7 @@ Lint/format with **ruff** and type-check with **mypy** (`uv run ruff check`, `uv
 
 ## File structure
 
-- `src/indycat/` — **the core**: the importable, UI-agnostic detect→crop→embed→decide pipeline. Currently `detection.py` and `embedding.py` (decide module still to come). The core never imports from `scripts/` or `experiments/`.
+- `src/indycat/` — **the core**: the importable, UI-agnostic detect→crop→embed→decide pipeline (`detection.py`, `embedding.py`, `decision.py`). The core never imports from `scripts/` or `experiments/`.
 - `scripts/` — **keepers**: reusable, maintained entry points that drive the core (build gallery, embed datasets, calibrate, evaluate, UI launchers).
 - `experiments/` — **throwaway**: exploratory one-offs, the "each data addition is a measured experiment" scratch space. Committed (shared dependency set); promote anything worth keeping into `scripts/`.
 - `tests/` — pytest suite.
