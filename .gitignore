@@ -29,6 +29,9 @@ __pycache__/
 # Oxford-IIIT Pet: downloaded negatives, local only (like the Indy photos).
 /images/oxford-iiit-pet/
 
+# Cat-breeds (Kaggle ma7555): downloaded eval negatives, local only (1.9 GB).
+/images/cat-breeds/
+
 # Streamlit app static dir: a local copy of the photos for the data-review
 # app's data grid, synced from images/indy at runtime — reproducible.
 /scripts/data_review/static/

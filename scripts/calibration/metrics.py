@@ -117,12 +117,20 @@ def build_sweep(
     positives: list[ScoredImage],
     negatives: list[ScoredImage],
     thresholds: list[float],
+    lookalike_breeds: frozenset[str] = LOOKALIKE_BREEDS,
 ) -> list[SweepRow]:
-    """The main trade-off: FPR (overall / look-alike / easy) and recall per cutoff."""
+    """The main trade-off: FPR (overall / look-alike / easy) and recall per cutoff.
+
+    ``lookalike_breeds`` partitions the negatives into the look-alike and easy
+    groups; it defaults to the Oxford :data:`LOOKALIKE_BREEDS` so calibrate and
+    the Oxford evaluation are unchanged. A different negatives source (e.g. the
+    cat-breeds eval) passes its own long-haired set so ``fpr_lookalike`` measures
+    *its* hard negatives rather than silently collapsing to the easy bucket.
+    """
     pos = [s.score for s in positives]
     neg_all = [s.score for s in negatives]
-    neg_look = [s.score for s in negatives if s.breed in LOOKALIKE_BREEDS]
-    neg_easy = [s.score for s in negatives if s.breed not in LOOKALIKE_BREEDS]
+    neg_look = [s.score for s in negatives if s.breed in lookalike_breeds]
+    neg_easy = [s.score for s in negatives if s.breed not in lookalike_breeds]
     return [
         SweepRow(
             cutoff=t,

@@ -70,6 +70,11 @@ def oxford_variant_dir(variant: EmbeddingsVariant) -> Path:
     return variant.dir(EMBEDDINGS_ROOT / "oxford")
 
 
+def catbreeds_variant_dir(variant: EmbeddingsVariant) -> Path:
+    """The cat-breeds cache dir for ``variant`` under ``EMBEDDINGS_ROOT/catbreeds``."""
+    return variant.dir(EMBEDDINGS_ROOT / "catbreeds")
+
+
 #: Source-image directories, keyed to the ``source_filename`` columns: Indy's
 #: ``metadata.csv`` names live directly in ``images/indy/`` and Oxford's under
 #: ``images/oxford-iiit-pet/images/``. The HTML report embeds these full images.

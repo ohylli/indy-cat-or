@@ -38,8 +38,9 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from _common import EmbeddingsMeta, EmbeddingsVariant, load_embeddings_variant
-from calibration.artifact import CalibrationArtifact, EmbeddingIdentity, load_artifact
+from _common import load_embeddings_variant
+from calibration.artifact import CalibrationArtifact, load_artifact
+from calibration.cache_variant import artifact_variant, assert_cache_matches_artifact
 from calibration.evaluate_report_html import write_report_html
 from calibration.evaluate_report_text import build_report, write_scores_csv
 from calibration.manifest import (
@@ -63,61 +64,7 @@ def default_report_name(artifact_path: Path) -> str:
     return f"eval-{artifact_path.stem}.html"
 
 
-def _artifact_variant(embedding: EmbeddingIdentity) -> EmbeddingsVariant:
-    """The cache variant the frozen artifact dictates the test set was embedded in.
-
-    ``EmbeddingsVariant`` carries the three directory axes (``model_id``,
-    ``detect``, ``margin``); ``margin`` is irrelevant under ``--no-detect`` so it
-    is recorded ``None`` in the artifact -- coerce it to ``crop_slug``'s harmless
-    ``0.0`` for the path (``nocrop`` ignores it anyway).
-    """
-    return EmbeddingsVariant(
-        model_id=embedding.model_id,
-        detect=embedding.detect,
-        margin=embedding.margin if embedding.margin is not None else 0.0,
-    )
-
-
-def _artifact_variant_key(
-    embedding: EmbeddingIdentity,
-) -> tuple[str, bool, float | None, float | None]:
-    """The artifact's normalized identity, matching :meth:`EmbeddingsMeta.variant_key`.
-
-    ``(model_id, detect, margin, min_confidence)`` with ``margin``/``min_confidence``
-    forced to ``None`` when ``detect`` is false -- so the artifact compares equal to
-    the sidecars it was frozen against (the artifact already stores them ``None``,
-    but normalize here too so the comparison is symmetric with the cache side).
-    """
-    if not embedding.detect:
-        return (embedding.model_id, embedding.detect, None, None)
-    return (
-        embedding.model_id,
-        embedding.detect,
-        embedding.margin,
-        embedding.min_confidence,
-    )
-
-
-def _assert_cache_matches_artifact(
-    meta: EmbeddingsMeta, embedding: EmbeddingIdentity, dataset: str
-) -> None:
-    """Loud if a loaded test cache's variant != the artifact's frozen embedding.
-
-    Evaluate takes no ``--model``/``--margin`` flag -- the variant is dictated by
-    the frozen artifact (invariant #2 of ``docs/embeddings_provenance.md``). A test
-    cache embedded with a different backbone or crop than the gallery would compare
-    a query against the gallery on mismatched footing, exactly the silently-wrong
-    accuracy the provenance design exists to prevent, so a drift is a hard error.
-    """
-    if meta.variant_key() != _artifact_variant_key(embedding):
-        raise SplitConfigError(
-            f"{dataset} test cache variant {meta.variant_key()} != the artifact's "
-            f"frozen embedding identity {_artifact_variant_key(embedding)}; the "
-            "held-out exam was embedded on different footing than the gallery"
-        )
-
-
-def _assert_same_experiment(
+def assert_same_experiment(
     manifest: SplitManifest, artifact: CalibrationArtifact
 ) -> None:
     """The disjointness guard: manifest and artifact must describe one experiment.
@@ -126,7 +73,8 @@ def _assert_same_experiment(
     manifest. If a ``--manifest`` override points at a different-seed split, its
     ``test`` set could overlap the artifact's gallery and silently inflate recall
     by self-matching. Requiring the gallery sets to be identical defends that
-    path; a mismatch is loud (``docs/calibration_design.md`` Sec. 7).
+    path; a mismatch is loud (``docs/calibration_design.md`` Sec. 7). Shared with
+    the cat-breeds eval, whose Indy positives come from the same manifest role.
     """
     artifact_gallery = {img.source_filename for img in artifact.gallery_images}
     if set(manifest.indy_gallery) != artifact_gallery:
@@ -153,7 +101,7 @@ def run_evaluation(
     binding the fingerprint protects); scoring uses ``artifact.aggregation`` and
     the frozen ``artifact.threshold`` verbatim.
     """
-    _assert_same_experiment(manifest, artifact)
+    assert_same_experiment(manifest, artifact)
     if not manifest.indy_test or not manifest.oxford_test:
         raise SplitConfigError(
             "test set is empty (indy_test or oxford_test has no images); there is "
@@ -163,14 +111,14 @@ def run_evaluation(
     # The test-set caches are dictated by the frozen artifact's embedding identity
     # -- no CLI flag selects them. Resolve both variant dirs, load with provenance,
     # and assert each loaded sidecar matches the artifact before any scoring runs.
-    variant = _artifact_variant(artifact.embedding)
+    variant = artifact_variant(artifact.embedding)
     oxford_dir = oxford_variant_dir(variant)
     indy_names, indy_vectors, indy_meta = load_embeddings_variant(
         indy_variant_dir(variant)
     )
     oxford_names, oxford_vectors, oxford_meta = load_embeddings_variant(oxford_dir)
-    _assert_cache_matches_artifact(indy_meta, artifact.embedding, "Indy")
-    _assert_cache_matches_artifact(oxford_meta, artifact.embedding, "Oxford")
+    assert_cache_matches_artifact(indy_meta, artifact.embedding, "Indy")
+    assert_cache_matches_artifact(oxford_meta, artifact.embedding, "Oxford")
 
     indy_lookup = build_name_to_vector(indy_names, indy_vectors)
     oxford_lookup = build_name_to_vector(oxford_names, oxford_vectors)
