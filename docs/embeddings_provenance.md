@@ -1,5 +1,17 @@
 # Embedding provenance: model + crop identity through the pipeline
 
+## Status
+
+**Done** (all of steps 1–11). Identity now lives in the data — an
+`embeddings.meta.yaml` sidecar beside each cache, the calibration artifact
+(format v2), and the split-manifest header (format v2) — and is asserted-equal
+wherever two identities meet (the assertion-net table below is all implemented).
+Caches live under `data/embeddings/<dataset>/<model_slug>/<crop_slug>/`; calibrate
+selects the variant via `--model`/`--no-detect`/`--margin`. The flat v1 caches /
+splits / artifacts were deleted and rebuilt against the `dinov2-base` /
+`crop-m0.1` baseline. The rest of this file is the original design and stays as
+the rationale of record.
+
 ## Why
 
 We are about to experiment with different DINOv2 variants (and later DINOv3).
