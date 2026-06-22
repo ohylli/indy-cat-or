@@ -2,8 +2,10 @@
 
 The embed stage re-runs YOLO over every Oxford cat image and drops images where
 no cat is detected (~4% of the 2371). Those misses are catalog rows whose
-``source_filename`` has no matching row in
-``data/embeddings/oxford/metadata.csv``. This view shows them as a paginated
+``source_filename`` has no matching row in the baseline crop-on variant's
+``metadata.csv`` (see ``OXFORD_METADATA_CSV`` in ``common.py``, which resolves
+under the variant-nested ``data/embeddings/oxford/<model>/<crop>/`` layout).
+This view shows them as a paginated
 image grid so a sighted helper can eyeball *why* the detector missed each one --
 cat too small, occluded, odd pose, etc.
 """
@@ -37,9 +39,10 @@ def render_misses(misses: list[str] | None) -> None:
     """Paginated grid of the missed images, ``COLUMNS`` per row, filename caption."""
     if misses is None:
         st.warning(
-            "Need both `images/oxford-iiit-pet/catalog.csv` and "
-            "`data/embeddings/oxford/metadata.csv`. Run "
-            "`uv run python scripts/build_oxford_negatives.py` to generate them."
+            f"Need both `{OXFORD_CATALOG_CSV}` and `{OXFORD_METADATA_CSV}`. "
+            "Run `uv run python scripts/build_oxford_negatives.py` to build the "
+            "baseline crop-on variant (its default `--out-dir` is exactly that "
+            "path)."
         )
         return
     if not misses:

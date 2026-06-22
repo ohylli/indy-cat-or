@@ -15,14 +15,17 @@ import pytest
 import yaml
 
 from calibration.manifest import (
+    DEFAULT_MODEL,
     DEFAULT_SEED,
     MANIFEST_FORMAT_VERSION,
     REPO_ROOT,
     STRATEGY_THREE_WAY,
+    EmbeddingProvenance,
     GenerationParams,
     IndyRecord,
     OxfordRecord,
     SplitConfigError,
+    SplitManifest,
     assert_disjoint,
     generate_three_way,
     load_indy_metadata,
@@ -84,6 +87,39 @@ def make_oxford_records(per_breed: dict[str, int]) -> list[OxfordRecord]:
         for k in range(1, count + 1):
             records.append(OxfordRecord(f"{breed}_{k}.jpg", breed))
     return records
+
+
+def baseline_embedding(**overrides: object) -> EmbeddingProvenance:
+    """The crop-on baseline variant recorded in a manifest header."""
+    defaults: dict[str, object] = {
+        "model_id": DEFAULT_MODEL,
+        "detect": True,
+        "margin": 0.1,
+        "min_confidence": 0.25,
+    }
+    defaults.update(overrides)
+    return EmbeddingProvenance(**defaults)  # type: ignore[arg-type]
+
+
+def gen(
+    indy: list[IndyRecord],
+    oxford: list[OxfordRecord],
+    params: GenerationParams,
+    embedding: EmbeddingProvenance | None = None,
+    random_seed_drawn: bool = False,
+) -> SplitManifest:
+    """``generate_three_way`` with the baseline embedding defaulted in.
+
+    Keeps the existing test bodies focused on split logic; the embedding header
+    round-trips through its own dedicated tests.
+    """
+    return generate_three_way(
+        indy,
+        oxford,
+        params,
+        embedding if embedding is not None else baseline_embedding(),
+        random_seed_drawn=random_seed_drawn,
+    )
 
 
 def baseline_params(**overrides: object) -> GenerationParams:
@@ -167,7 +203,7 @@ def write_oxford_csv(
 
 
 def test_three_way_role_counts_exact() -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(), make_oxford_records({"A": 10, "B": 10}), baseline_params()
     )
     assert len(manifest.indy_gallery) == 15
@@ -176,7 +212,7 @@ def test_three_way_role_counts_exact() -> None:
 
 
 def test_under_ask_leaves_leftovers_no_error() -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(),
         make_oxford_records({"A": 10}),
         baseline_params(gallery=5, calibration=5, test=5),
@@ -196,7 +232,7 @@ def test_under_ask_leaves_leftovers_no_error() -> None:
 
 def test_overask_raises() -> None:
     with pytest.raises(SplitConfigError, match="37"):
-        generate_three_way(
+        gen(
             make_indy_records(35),
             make_oxford_records({"A": 10}),
             baseline_params(gallery=15, calibration=10, test=12),
@@ -206,7 +242,7 @@ def test_overask_raises() -> None:
 def test_overask_validated_against_actual_rows() -> None:
     # Only 30 embedded -> the baseline 15+10+10=35 must refuse, not truncate.
     with pytest.raises(SplitConfigError, match="only 30"):
-        generate_three_way(
+        gen(
             make_indy_records(30),
             make_oxford_records({"A": 10}),
             baseline_params(),
@@ -215,7 +251,7 @@ def test_overask_validated_against_actual_rows() -> None:
 
 def test_empty_gallery_rejected() -> None:
     with pytest.raises(SplitConfigError, match="gallery"):
-        generate_three_way(
+        gen(
             make_indy_records(),
             make_oxford_records({"A": 10}),
             baseline_params(gallery=0),
@@ -230,24 +266,24 @@ def test_empty_gallery_rejected() -> None:
 def test_test_split_invariant_to_gallery_calibration() -> None:
     indy = make_indy_records()
     oxford = make_oxford_records({"A": 10})
-    a = generate_three_way(indy, oxford, baseline_params(gallery=15, calibration=10))
-    b = generate_three_way(indy, oxford, baseline_params(gallery=5, calibration=5))
+    a = gen(indy, oxford, baseline_params(gallery=15, calibration=10))
+    b = gen(indy, oxford, baseline_params(gallery=5, calibration=5))
     assert set(a.indy_test) == set(b.indy_test)
 
 
 def test_changing_seed_changes_test() -> None:
     indy = make_indy_records()
     oxford = make_oxford_records({"A": 10})
-    a = generate_three_way(indy, oxford, baseline_params(seed=42))
-    b = generate_three_way(indy, oxford, baseline_params(seed=43))
+    a = gen(indy, oxford, baseline_params(seed=42))
+    b = gen(indy, oxford, baseline_params(seed=43))
     assert set(a.indy_test) != set(b.indy_test)
 
 
 def test_prefer_does_not_move_test() -> None:
     indy = make_indy_records()
     oxford = make_oxford_records({"A": 10})
-    a = generate_three_way(indy, oxford, baseline_params(prefer=None))
-    b = generate_three_way(indy, oxford, baseline_params(prefer="tail_visible"))
+    a = gen(indy, oxford, baseline_params(prefer=None))
+    b = gen(indy, oxford, baseline_params(prefer="tail_visible"))
     assert set(a.indy_test) == set(b.indy_test)
 
 
@@ -263,7 +299,7 @@ def test_select_test_split_is_pure_function() -> None:
 def test_prefer_biases_gallery_toward_tail_visible() -> None:
     indy = make_indy_records(n=35, n_tail=20)
     oxford = make_oxford_records({"A": 10})
-    manifest = generate_three_way(indy, oxford, baseline_params(prefer="tail_visible"))
+    manifest = gen(indy, oxford, baseline_params(prefer="tail_visible"))
     tail = {r.source_filename for r in indy if r.tail_visible}
     # Gallery should be skimmed from the tail-visible pool that survived the test draw.
     in_gallery = sum(name in tail for name in manifest.indy_gallery)
@@ -276,7 +312,7 @@ def test_prefer_biases_gallery_toward_tail_visible() -> None:
 
 
 def test_generated_roles_are_disjoint() -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(), make_oxford_records({"A": 10, "B": 10}), baseline_params()
     )
     assert_disjoint(manifest.indy_role_lists(), "Indy")
@@ -299,7 +335,7 @@ def test_assert_disjoint_detects_intra_role_duplicate() -> None:
 
 
 def test_write_then_load_roundtrip(tmp_path: Path) -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(), make_oxford_records({"A": 10, "B": 10}), baseline_params()
     )
     path = tmp_path / "m.yaml"
@@ -308,8 +344,49 @@ def test_write_then_load_roundtrip(tmp_path: Path) -> None:
     assert loaded == manifest
 
 
+def test_format_version_is_two() -> None:
+    assert MANIFEST_FORMAT_VERSION == 2
+
+
+def test_embedding_header_round_trips(tmp_path: Path) -> None:
+    embedding = baseline_embedding(model_id="facebook/dinov2-large", margin=0.2)
+    manifest = gen(
+        make_indy_records(),
+        make_oxford_records({"A": 10}),
+        baseline_params(),
+        embedding=embedding,
+    )
+    path = tmp_path / "m.yaml"
+    write_manifest(manifest, path)
+    # Serialized into the header, not just the filename.
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert raw["embedding"] == {
+        "model_id": "facebook/dinov2-large",
+        "detect": True,
+        "margin": 0.2,
+        "min_confidence": 0.25,
+    }
+    loaded = load_manifest(path)
+    assert loaded.embedding == embedding
+
+
+def test_nocrop_embedding_header_normalizes_margin(tmp_path: Path) -> None:
+    # A nocrop variant carries no margin/min_confidence; the variant_key drops them.
+    embedding = baseline_embedding(detect=False, margin=None, min_confidence=None)
+    manifest = gen(
+        make_indy_records(),
+        make_oxford_records({"A": 10}),
+        baseline_params(),
+        embedding=embedding,
+    )
+    path = tmp_path / "m.yaml"
+    write_manifest(manifest, path)
+    loaded = load_manifest(path)
+    assert loaded.embedding.variant_key() == (DEFAULT_MODEL, False, None, None)
+
+
 def test_yaml_is_ordered_and_well_formed(tmp_path: Path) -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(), make_oxford_records({"A": 10}), baseline_params()
     )
     path = tmp_path / "m.yaml"
@@ -326,7 +403,7 @@ def test_yaml_is_ordered_and_well_formed(tmp_path: Path) -> None:
 
 
 def test_load_uses_body_verbatim_not_recomputed(tmp_path: Path) -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(), make_oxford_records({"A": 10}), baseline_params()
     )
     data = manifest_to_dict(manifest)
@@ -342,7 +419,7 @@ def test_load_uses_body_verbatim_not_recomputed(tmp_path: Path) -> None:
 
 
 def test_load_rejects_overlapping_roles(tmp_path: Path) -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(), make_oxford_records({"A": 10}), baseline_params()
     )
     data = manifest_to_dict(manifest)
@@ -354,7 +431,7 @@ def test_load_rejects_overlapping_roles(tmp_path: Path) -> None:
 
 
 def test_load_rejects_wrong_format_version(tmp_path: Path) -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(), make_oxford_records({"A": 10}), baseline_params()
     )
     data = manifest_to_dict(manifest)
@@ -366,7 +443,7 @@ def test_load_rejects_wrong_format_version(tmp_path: Path) -> None:
 
 
 def test_load_rejects_tampered_breed_summary(tmp_path: Path) -> None:
-    manifest = generate_three_way(
+    manifest = gen(
         make_indy_records(), make_oxford_records({"A": 10, "B": 10}), baseline_params()
     )
     data = manifest_to_dict(manifest)
@@ -431,8 +508,8 @@ def test_default_seed_is_bit_for_bit_repeatable() -> None:
     indy = make_indy_records()
     oxford = make_oxford_records({"A": 10, "B": 10})
     params = baseline_params(seed=DEFAULT_SEED)
-    a = generate_three_way(indy, oxford, params)
-    b = generate_three_way(indy, oxford, params)
+    a = gen(indy, oxford, params)
+    b = gen(indy, oxford, params)
     assert a.indy_role_lists() == b.indy_role_lists()
     assert a.oxford_role_lists() == b.oxford_role_lists()
 

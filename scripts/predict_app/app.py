@@ -39,15 +39,28 @@ UPLOAD_TYPES = ["jpg", "jpeg", "png", "webp", "bmp"]
 
 
 @st.cache_resource
-def load_detector() -> CatDetector:
-    """The YOLO cat detector, loaded once per server (weights are heavy)."""
-    return CatDetector()
+def load_detector(min_confidence: float | None) -> CatDetector:
+    """The YOLO cat detector, loaded once per ``min_confidence`` (weights heavy).
+
+    ``min_confidence`` comes from the frozen artifact (``embedding.min_confidence``)
+    so the live detector uses the same threshold the gallery was built with rather
+    than silently the constructor default. ``None`` -- the artifact's value when
+    detect was off -- falls back to ``CatDetector``'s own default.
+    """
+    if min_confidence is None:
+        return CatDetector()
+    return CatDetector(min_confidence=min_confidence)
 
 
 @st.cache_resource
-def load_embedder() -> Embedder:
-    """The frozen DINOv2 embedder, loaded once per server."""
-    return Embedder()
+def load_embedder(model_id: str) -> Embedder:
+    """The frozen DINOv2 embedder, loaded once per ``model_id``.
+
+    Keyed by ``model_id`` (from the artifact's ``embedding.model_id``) so the
+    query is embedded with the *same* backbone that built the gallery -- a
+    same-dim backbone swap would otherwise produce silently-wrong scores.
+    """
+    return Embedder(model=model_id)
 
 
 @st.cache_resource
@@ -212,16 +225,31 @@ def main() -> None:
     artifact, gallery, positions = load_bundle(str(artifact_path))
     render_context(artifact)
 
+    # Load the live models from the frozen embedding identity so the query is
+    # cropped/embedded on the gallery's footing (docs/embeddings_provenance.md
+    # step 8); guard the live backbone's width against the frozen gallery.
+    embedder = load_embedder(artifact.embedding.model_id)
+    detector = load_detector(artifact.embedding.min_confidence)
+    if embedder.embedding_dim != gallery.vectors.shape[1]:
+        st.error(
+            f"Live embedder `{embedder.model_id}` produces "
+            f"{embedder.embedding_dim}-dimensional vectors but the frozen gallery "
+            f"is {gallery.vectors.shape[1]}-dimensional. The artifact's embedding "
+            "model does not match its gallery vectors -- recalibrate."
+        )
+        return
+
     threshold = threshold_slider(artifact)
 
     with st.form("classify"):
         upload = st.file_uploader("Image to classify", type=UPLOAD_TYPES)
         detect = st.toggle(
             "Detect and crop the cat first",
-            value=True,
+            value=artifact.embedding.detect,
             help=(
                 "On: find the cat and embed only the crop (the calibrated path). "
-                "Off: embed the whole frame -- which may latch onto the background."
+                "Off: embed the whole frame -- which may latch onto the background. "
+                "Defaults to the setting the frozen gallery was built with."
             ),
         )
         submitted = st.form_submit_button("Classify")
@@ -246,14 +274,15 @@ def main() -> None:
     with st.status("Detecting, embedding and scoring…", expanded=False) as status:
         result = predict.classify(
             image,
-            detector=load_detector(),
-            embedder=load_embedder(),
+            detector=detector,
+            embedder=embedder,
             gallery=gallery,
             positions=positions,
             threshold=threshold,
             aggregation=cast(Aggregation, artifact.aggregation),
             comparison=artifact.comparison,
             detect=detect,
+            margin=artifact.embedding.margin,
         )
         status.update(label="Done.", state="complete")
 

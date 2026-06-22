@@ -19,9 +19,18 @@ Two stages, selected by ``--download-only``:
     download  ensure the data is present, write ``catalog.csv`` (every cat image
               -> breed) and print per-breed counts -- a text check that the 12
               breeds at ~200 each are there, without opening any image.
-    embed     (default) also detect+crop+embed every cat and write the row-
-              aligned ``embeddings.npy`` + ``metadata.csv`` (the Indy columns
-              plus a ``breed`` column).
+    embed     (default) also detect+crop+embed every cat and write, into the
+              resolved ``--out-dir``, the row-aligned ``embeddings.npy`` +
+              ``metadata.csv`` (the Indy columns plus a ``breed`` column) and
+              the per-variant ``embeddings.meta.yaml`` provenance sidecar (the
+              source of truth the folder name only mirrors; see
+              ``docs/embeddings_provenance.md``). ``catalog.csv`` stays beside
+              the raw dataset -- it describes the dataset, not a given run.
+
+When ``--out-dir`` is omitted it is derived as
+``data/embeddings/oxford/<model_slug>/<crop_slug>`` so each (model, crop)
+variant lands in its own subdir and large vectors can never drop into the base
+folder by accident.
 
 Like the gallery builder, the top-confidence crop is the one kept per image; an
 image with no cat detected is counted and skipped, never embedded as a full
@@ -47,9 +56,12 @@ from torchvision.datasets import OxfordIIITPet
 
 from _common import (
     BASE_METADATA_COLUMNS,
+    EmbeddingsMeta,
+    EmbeddingsVariant,
     base_metadata_cells,
     embed_in_batches,
     load_image,
+    write_embeddings_meta,
 )
 from indycat.detection import CatDetector, Detection, detect_and_crop
 from indycat.embedding import Embedder
@@ -149,9 +161,10 @@ def main() -> None:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=REPO_ROOT / "data" / "embeddings" / "oxford",
-        help="folder for embeddings.npy + metadata.csv "
-        "(default: data/embeddings/oxford)",
+        default=None,
+        help="folder for embeddings.npy + metadata.csv + the sidecar; default "
+        "derives the variant subdir under data/embeddings/oxford from "
+        "(model, detect, margin)",
     )
     parser.add_argument(
         "--download-only",
@@ -216,7 +229,15 @@ def main() -> None:
     if args.limit is not None:
         cats = cats[: args.limit]
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    detect = not args.no_detect
+    out_dir: Path = args.out_dir
+    if out_dir is None:
+        # Derive the per-variant subdir so the no-arg run lands in its own
+        # (model, crop) folder rather than the shared base dir.
+        out_dir = EmbeddingsVariant(args.model, detect, args.margin).dir(
+            REPO_ROOT / "data" / "embeddings" / "oxford"
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     detector = (
         None
@@ -248,12 +269,27 @@ def main() -> None:
     embeddings = embed_in_batches(embedder, crops, args.batch_size)
     elapsed = time.perf_counter() - start
 
-    np.save(args.out_dir / "embeddings.npy", embeddings)
-    write_metadata(rows, args.out_dir / "metadata.csv")
+    np.save(out_dir / "embeddings.npy", embeddings)
+    write_metadata(rows, out_dir / "metadata.csv")
+    # margin/min_confidence are None when detect is off so the on-disk sidecar
+    # matches the normalized variant key (write_embeddings_meta also nulls them).
+    write_embeddings_meta(
+        EmbeddingsMeta(
+            format_version=1,
+            model_id=embedder.model_id,
+            embedding_dim=embedder.embedding_dim,
+            normalized=False,
+            detect=detect,
+            margin=args.margin if detect else None,
+            min_confidence=args.min_confidence if detect else None,
+            row_count=len(rows),
+        ),
+        out_dir,
+    )
 
     print(
         f"\nSummary: {len(cats)} cats processed, {len(rows)} embeddings "
-        f"of dim {embedder.embedding_dim} written to {args.out_dir}"
+        f"of dim {embedder.embedding_dim} written to {out_dir}"
     )
     print(f"  device: {embedder.device}")
     print(f"  embedded in {elapsed:.1f}s")

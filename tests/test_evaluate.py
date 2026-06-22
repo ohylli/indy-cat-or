@@ -16,18 +16,23 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from _common import EmbeddingsMeta, EmbeddingsVariant, write_embeddings_meta
 from calibration import evaluate
+from calibration import manifest as manifest_mod
 from calibration.artifact import (
+    ARTIFACT_FORMAT_VERSION,
     CalibrationArtifact,
     ChosenBy,
+    EmbeddingIdentity,
     GalleryImageRef,
     MetricsAtThreshold,
 )
 from calibration.evaluate_report_html import render_report_html
 from calibration.evaluate_report_text import build_report, write_scores_csv
 from calibration.manifest import (
+    MANIFEST_FORMAT_VERSION,
+    EmbeddingProvenance,
     GenerationParams,
-    OxfordRecord,
     SplitConfigError,
     SplitManifest,
 )
@@ -37,15 +42,38 @@ GALLERY = ["g0.jpeg", "g1.jpeg"]
 INDY_TEST = ["t0.jpeg", "t1.jpeg"]
 OXFORD_TEST = ["Persian_5.jpg", "Ragdoll_5.jpg"]
 
+#: The baseline variant the artifact's frozen embedding identity dictates; the
+#: fake test caches are written into its dir + sidecar so evaluate's variant
+#: resolution + cross-check pass.
+BASELINE = EmbeddingsVariant(model_id="facebook/dinov2-base", detect=True, margin=0.1)
+EMBED_DIM = 8
+
+
+def make_embedding_identity(**overrides: object) -> EmbeddingIdentity:
+    """The artifact's frozen embedding block (baseline variant by default)."""
+    defaults: dict[str, object] = {
+        "model_id": "facebook/dinov2-base",
+        "embedding_dim": EMBED_DIM,
+        "detect": True,
+        "margin": 0.1,
+        "min_confidence": 0.25,
+    }
+    defaults.update(overrides)
+    return EmbeddingIdentity(**defaults)  # type: ignore[arg-type]
+
 
 def make_artifact(
-    *, gallery: list[str] = GALLERY, threshold: float = 0.5
+    *,
+    gallery: list[str] = GALLERY,
+    threshold: float = 0.5,
+    embedding: EmbeddingIdentity | None = None,
 ) -> CalibrationArtifact:
     return CalibrationArtifact(
-        format_version=1,
+        format_version=ARTIFACT_FORMAT_VERSION,
         threshold=threshold,
         aggregation="max",
         comparison=">=",
+        embedding=embedding if embedding is not None else make_embedding_identity(),
         gallery_vectors_file="m.gallery.npy",
         gallery_fingerprint="sha256:deadbeef",
         gallery_count=len(gallery),
@@ -87,8 +115,14 @@ def make_manifest(
         prefer=None,
     )
     return SplitManifest(
-        format_version=1,
+        format_version=MANIFEST_FORMAT_VERSION,
         params=params,
+        embedding=EmbeddingProvenance(
+            model_id="facebook/dinov2-base",
+            detect=True,
+            margin=0.1,
+            min_confidence=0.25,
+        ),
         generated_at="2026-01-01T00:00:00+00:00",
         random_seed_drawn=False,
         indy_gallery=list(gallery),
@@ -101,22 +135,83 @@ def make_manifest(
     )
 
 
+def _write_metadata_csv(path: Path, names: list[str], *, breeds: bool) -> None:
+    """Write a minimal embeddings ``metadata.csv`` (loader reads source_filename)."""
+    columns = [
+        "row",
+        "source_filename",
+        "detect_used",
+        "confidence",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "area_fraction",
+    ]
+    if breeds:
+        columns = [*columns, "breed"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(columns)
+        for i, name in enumerate(names):
+            base = [i, name, True, "0.9", 0, 0, 1, 1, "0.5"]
+            writer.writerow([*base, name.split("_")[0]] if breeds else base)
+
+
+def baseline_sidecar(row_count: int, **overrides: object) -> EmbeddingsMeta:
+    """A sidecar matching the baseline variant, with optional field overrides."""
+    defaults: dict[str, object] = {
+        "format_version": 1,
+        "model_id": "facebook/dinov2-base",
+        "embedding_dim": EMBED_DIM,
+        "normalized": False,
+        "detect": True,
+        "margin": 0.1,
+        "min_confidence": 0.25,
+        "row_count": row_count,
+    }
+    defaults.update(overrides)
+    return EmbeddingsMeta(**defaults)  # type: ignore[arg-type]
+
+
+def write_variant_cache(
+    out_dir: Path, names: list[str], *, breeds: bool, meta: EmbeddingsMeta
+) -> None:
+    """Write a full variant cache: metadata.csv + embeddings.npy + the sidecar."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_metadata_csv(out_dir / "metadata.csv", names, breeds=breeds)
+    rng = np.random.default_rng(len(names))
+    vectors = rng.standard_normal((len(names), EMBED_DIM)).astype(np.float32)
+    np.save(out_dir / "embeddings.npy", vectors)
+    write_embeddings_meta(meta, out_dir)
+
+
 @pytest.fixture
-def fake_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub evaluate's embeddings cache + Oxford metadata with in-memory data.
+def fake_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point evaluate at synthetic baseline-variant test caches under a tmp root.
 
-    Returns synthetic 8-dim vectors keyed to the test images' filenames, so the
-    full scoring path runs without a GPU, real weights, or the gitignored data.
+    Writes real Indy + Oxford variant dirs (metadata.csv + embeddings.npy +
+    sidecar) matching the artifact's frozen embedding block, so the full
+    ``load_embeddings_variant`` + variant cross-check + scoring path runs without a
+    GPU, real weights, or the gitignored data. Returns the tmp embeddings root so a
+    test can overwrite a sidecar to force the artifact-vs-cache mismatch.
     """
-    oxford = [OxfordRecord(name, name.split("_")[0]) for name in OXFORD_TEST]
-    monkeypatch.setattr(evaluate, "load_oxford_metadata", lambda: oxford)
+    embeddings_root = tmp_path / "embeddings"
+    monkeypatch.setattr(manifest_mod, "EMBEDDINGS_ROOT", embeddings_root)
 
-    def cache(metadata_path: Path, embeddings_path: Path) -> tuple[list[str], object]:
-        names = INDY_TEST if metadata_path == evaluate.INDY_METADATA else OXFORD_TEST
-        rng = np.random.default_rng(len(names))
-        return names, rng.standard_normal((len(names), 8)).astype(np.float32)
-
-    monkeypatch.setattr(evaluate, "load_cached_embeddings", cache)
+    write_variant_cache(
+        BASELINE.dir(embeddings_root / "indy"),
+        INDY_TEST,
+        breeds=False,
+        meta=baseline_sidecar(len(INDY_TEST)),
+    )
+    write_variant_cache(
+        BASELINE.dir(embeddings_root / "oxford"),
+        OXFORD_TEST,
+        breeds=True,
+        meta=baseline_sidecar(len(OXFORD_TEST)),
+    )
+    return embeddings_root
 
 
 def raw_gallery() -> np.ndarray:
@@ -147,7 +242,7 @@ def test_confusion_at_counts() -> None:
 
 
 def test_run_evaluation_prints_grade(
-    fake_cache: None, capsys: pytest.CaptureFixture[str]
+    fake_cache: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     evaluate.run_evaluation(
         make_artifact(), raw_gallery(), make_manifest(), "art.yaml", "m.yaml", None
@@ -161,7 +256,7 @@ def test_run_evaluation_prints_grade(
 
 
 def test_run_evaluation_writes_html(
-    fake_cache: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    fake_cache: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     html_out = tmp_path / "reports" / "eval.html"
     evaluate.run_evaluation(
@@ -171,7 +266,7 @@ def test_run_evaluation_writes_html(
     assert "HTML report written to" in capsys.readouterr().out
 
 
-def test_disjointness_guard_is_loud(fake_cache: None) -> None:
+def test_disjointness_guard_is_loud(fake_cache: Path) -> None:
     # A manifest whose gallery differs from the artifact's frozen gallery.
     bad = make_manifest(gallery=["other0.jpeg", "other1.jpeg"])
     with pytest.raises(SplitConfigError, match="different experiments"):
@@ -180,11 +275,27 @@ def test_disjointness_guard_is_loud(fake_cache: None) -> None:
         )
 
 
-def test_empty_test_is_loud(fake_cache: None) -> None:
+def test_empty_test_is_loud(fake_cache: Path) -> None:
     empty = make_manifest(indy_test=[], oxford_test=[])
     with pytest.raises(SplitConfigError, match="nothing to grade"):
         evaluate.run_evaluation(
             make_artifact(), raw_gallery(), empty, "art.yaml", "m.yaml", None
+        )
+
+
+def test_artifact_vs_cache_variant_mismatch_is_loud(
+    fake_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Re-stamp the Indy test cache's sidecar with a different model than the
+    # artifact's frozen embedding identity records. Evaluate has no --model flag,
+    # so the variant is dictated by the artifact -- a drift must fail loudly.
+    indy_dir = BASELINE.dir(fake_cache / "indy")
+    write_embeddings_meta(
+        baseline_sidecar(len(INDY_TEST), model_id="facebook/dinov2-large"), indy_dir
+    )
+    with pytest.raises(SplitConfigError, match="different footing"):
+        evaluate.run_evaluation(
+            make_artifact(), raw_gallery(), make_manifest(), "art.yaml", "m.yaml", None
         )
 
 
@@ -205,7 +316,7 @@ def test_main_resolves_missing_manifest_loudly(
 
 
 def test_main_end_to_end_writes_html(
-    fake_cache: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    fake_cache: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     art = make_artifact()
     manifest_file = tmp_path / "m.yaml"
@@ -343,7 +454,7 @@ def test_write_scores_csv_has_verdict_column(tmp_path: Path) -> None:
 
 
 def test_main_end_to_end_writes_scores_csv(
-    fake_cache: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    fake_cache: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     art = make_artifact()
     manifest_file = tmp_path / "m.yaml"

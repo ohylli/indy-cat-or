@@ -13,12 +13,21 @@ Pass ``--no-detect`` to embed the full frame instead of the cat crop; this is
 the toggle that lets the detect-and-crop stage's effect on accuracy be measured
 rather than assumed.
 
-Output (two row-aligned files in ``--out-dir``):
+Output (three files in the resolved ``--out-dir``):
     embeddings.npy   float32 array of shape (n_rows, embedding_dim); row i is
                      the vector for the crop described by row i of the CSV.
     metadata.csv     one row per embedding, recording provenance so the
                      gallery/calibration/test split can be done later as a
                      text check.
+    embeddings.meta.yaml
+                     the per-variant provenance sidecar (model id, embedding
+                     dim, crop setting, row count) -- the source of truth the
+                     folder name only mirrors. See ``docs/embeddings_provenance.md``.
+
+When ``--out-dir`` is omitted it is derived as
+``data/embeddings/indy/<model_slug>/<crop_slug>`` so each (model, crop) variant
+lands in its own subdir and large vectors can never drop into the base folder
+by accident.
 
 Usage:
     uv run python scripts/build_indy_gallery.py
@@ -35,11 +44,14 @@ from PIL import Image
 
 from _common import (
     BASE_METADATA_COLUMNS,
+    EmbeddingsMeta,
+    EmbeddingsVariant,
     GalleryRow,
     base_metadata_cells,
     embed_in_batches,
     iter_images,
     load_image,
+    write_embeddings_meta,
 )
 from indycat.detection import CatDetector, detect_and_crop
 from indycat.embedding import Embedder
@@ -71,8 +83,10 @@ def main() -> None:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=REPO_ROOT / "data" / "embeddings" / "indy",
-        help="folder for embeddings.npy + metadata.csv (default: data/embeddings/indy)",
+        default=None,
+        help="folder for embeddings.npy + metadata.csv + the sidecar; default "
+        "derives the variant subdir under data/embeddings/indy from "
+        "(model, detect, margin)",
     )
     parser.add_argument(
         "--model",
@@ -103,6 +117,15 @@ def main() -> None:
         help="images per embedding forward pass (default: 32)",
     )
     args = parser.parse_args()
+
+    detect = not args.no_detect
+    out_dir: Path = args.out_dir
+    if out_dir is None:
+        # Derive the per-variant subdir so the no-arg run lands in its own
+        # (model, crop) folder rather than the shared base dir.
+        out_dir = EmbeddingsVariant(args.model, detect, args.margin).dir(
+            REPO_ROOT / "data" / "embeddings" / "indy"
+        )
 
     photos = iter_images(args.images_dir)
     if not photos:
@@ -140,13 +163,28 @@ def main() -> None:
     embedder = Embedder(model=args.model)
     embeddings = embed_in_batches(embedder, crops, args.batch_size)
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    np.save(args.out_dir / "embeddings.npy", embeddings)
-    write_metadata(rows, args.out_dir / "metadata.csv")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.save(out_dir / "embeddings.npy", embeddings)
+    write_metadata(rows, out_dir / "metadata.csv")
+    # margin/min_confidence are None when detect is off so the on-disk sidecar
+    # matches the normalized variant key (write_embeddings_meta also nulls them).
+    write_embeddings_meta(
+        EmbeddingsMeta(
+            format_version=1,
+            model_id=embedder.model_id,
+            embedding_dim=embedder.embedding_dim,
+            normalized=False,
+            detect=detect,
+            margin=args.margin if detect else None,
+            min_confidence=args.min_confidence if detect else None,
+            row_count=len(rows),
+        ),
+        out_dir,
+    )
 
     print(
         f"\nSummary: {len(photos)} photos, {len(rows)} embeddings "
-        f"of dim {embedder.embedding_dim} written to {args.out_dir}"
+        f"of dim {embedder.embedding_dim} written to {out_dir}"
     )
     print(f"  device: {embedder.device}")
     if no_cat:

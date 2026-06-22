@@ -50,7 +50,7 @@ from calibration.metrics import (
 from indycat.decision import Aggregation
 
 #: Asserted loudly at load, like the manifest's ``format_version``.
-ARTIFACT_FORMAT_VERSION = 1
+ARTIFACT_FORMAT_VERSION = 2
 
 #: The companion vectors file is named off the YAML stem so the pair travels
 #: together; the YAML stores only the basename, keeping it relocatable.
@@ -110,6 +110,24 @@ class MetricsAtThreshold:
 
 
 @dataclass(frozen=True)
+class EmbeddingIdentity:
+    """The embedding variant the frozen gallery was built with.
+
+    Operative: the predict app loads ``Embedder(model_id)`` and a detector at
+    ``min_confidence`` / ``detect`` / ``margin`` from this, so the live
+    detect->crop->embed matches the gallery's footing (invariant #2 of
+    ``docs/embeddings_provenance.md``). Evaluate asserts the test caches' variant
+    against it. ``margin``/``min_confidence`` are ``None`` when ``detect`` is off.
+    """
+
+    model_id: str
+    embedding_dim: int
+    detect: bool
+    margin: float | None
+    min_confidence: float | None
+
+
+@dataclass(frozen=True)
 class ChosenBy:
     """V2's rationale, serialized: how the threshold was picked."""
 
@@ -129,6 +147,7 @@ class CalibrationArtifact:
     threshold: float
     aggregation: str
     comparison: str
+    embedding: EmbeddingIdentity
     gallery_vectors_file: str
     gallery_fingerprint: str
     gallery_count: int
@@ -196,6 +215,7 @@ def build_artifact(
     positions: dict[str, tuple[str, str]],
     results: dict[Aggregation, AggregationResult],
     gallery_vectors_file: str,
+    embedding: EmbeddingIdentity,
     *,
     policy: str,
     target_fpr: float,
@@ -208,7 +228,8 @@ def build_artifact(
     *both* aggregations. The winner is FPR-first (see :func:`_winner_key`); its
     chosen cutoff and aggregation become the operative threshold, and the curve
     is the V1 sweep under that same aggregation so the frozen point is on a
-    visible trade-off.
+    visible trade-off. ``embedding`` records the variant the gallery was built
+    with, so the live decide stage and evaluate can match the same footing.
     """
     # ``AGGREGATIONS`` order (max first) is the exact-tie break, so iterate it.
     entries = [
@@ -238,6 +259,7 @@ def build_artifact(
         threshold=row.cutoff,
         aggregation=winner,
         comparison=COMPARISON,
+        embedding=embedding,
         gallery_vectors_file=gallery_vectors_file,
         gallery_fingerprint=gallery_fingerprint(raw_gallery_vectors),
         gallery_count=len(gallery_names),
@@ -290,6 +312,13 @@ def artifact_to_dict(artifact: CalibrationArtifact) -> dict[str, Any]:
         "threshold": artifact.threshold,
         "aggregation": artifact.aggregation,
         "comparison": artifact.comparison,
+        "embedding": {
+            "model_id": artifact.embedding.model_id,
+            "embedding_dim": artifact.embedding.embedding_dim,
+            "detect": artifact.embedding.detect,
+            "margin": artifact.embedding.margin,
+            "min_confidence": artifact.embedding.min_confidence,
+        },
         "gallery": {
             "vectors": artifact.gallery_vectors_file,
             "fingerprint": artifact.gallery_fingerprint,
@@ -370,6 +399,13 @@ def _artifact_from_dict(data: dict[str, Any]) -> CalibrationArtifact:
         threshold=data["threshold"],
         aggregation=data["aggregation"],
         comparison=data["comparison"],
+        embedding=EmbeddingIdentity(
+            model_id=data["embedding"]["model_id"],
+            embedding_dim=data["embedding"]["embedding_dim"],
+            detect=data["embedding"]["detect"],
+            margin=data["embedding"]["margin"],
+            min_confidence=data["embedding"]["min_confidence"],
+        ),
         gallery_vectors_file=gallery["vectors"],
         gallery_fingerprint=gallery["fingerprint"],
         gallery_count=gallery["count"],
@@ -449,5 +485,12 @@ def load_artifact(
         raise SplitConfigError(
             f"{vectors_path} has {raw_vectors.shape[0]} rows but "
             f"{yaml_path} declares gallery.count {artifact.gallery_count}"
+        )
+    if raw_vectors.shape[1] != artifact.embedding.embedding_dim:
+        raise SplitConfigError(
+            f"{vectors_path} vectors are {raw_vectors.shape[1]}-dimensional but "
+            f"{yaml_path} declares embedding.embedding_dim "
+            f"{artifact.embedding.embedding_dim}; the gallery vectors and the "
+            "frozen embedding identity no longer match"
         )
     return artifact, raw_vectors

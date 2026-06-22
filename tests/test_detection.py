@@ -64,7 +64,14 @@ def test_crop_rejects_negative_margin() -> None:
 
 @pytest.mark.slow
 def test_detector_finds_one_cat_in_indy_photo() -> None:
-    photos = sorted(p for p in INDY_DIR.iterdir() if p.suffix.lower() != ".csv")
+    # Only real image files: skip mapping.csv and any subdirectories (e.g.
+    # images/indy/indyface/), which iterdir() would otherwise hand to PIL.
+    image_suffixes = {".jpg", ".jpeg", ".png"}
+    photos = sorted(
+        p
+        for p in INDY_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in image_suffixes
+    )
     if not photos:
         pytest.skip("Indy photos not present (gitignored, local only)")
     result = CatDetector().detect(Image.open(photos[0]))

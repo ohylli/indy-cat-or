@@ -5,6 +5,12 @@ is `facebook/dinov2-base` (Apache 2.0, ungated). DINOv3 is a *gated, custom-lice
 upgrade, so getting it takes a few one-time browser + auth steps before the
 one-line code swap.
 
+How the model id is threaded through the pipeline (so a swap rebuilds the right
+caches and the live decision uses the matching backbone) is the subject of
+[`embeddings_provenance.md`](embeddings_provenance.md) — read it before swapping:
+the gallery/negatives builders, calibrate, and the predict app all key off the
+`--model` slug and the `embeddings.meta.yaml` / artifact `embedding` provenance.
+
 Verified against the installed stack: `transformers` 5.12.1, `huggingface_hub`
 1.19.0 (CLI is `hf`, not the old `huggingface-cli`). As of this writing we are
 **not** logged in and no `HF_TOKEN` is set — so all the access steps below apply.
@@ -93,7 +99,12 @@ isolates "v2 vs v3" from "bigger model." Add `large` if testing capacity too.
 ## After access lands — the swap
 
 1. Rebuild **both** galleries (Indy positives + Oxford negatives) with the new
-   model — caches are model-specific.
-2. Re-run calibration + evaluation and compare the headline metric
-   (**false-positive rate on look-alikes**, alongside Indy recall) against the
-   dinov2-base baseline. Let the numbers decide the backbone.
+   model — caches are model-specific. Pass `--model <id>` to each builder; the
+   vectors land in their own variant dir
+   (`data/embeddings/<dataset>/<model_slug>/<crop_slug>/`) beside the dinov2-base
+   ones, each with its own `embeddings.meta.yaml`, so the comparison is a sibling
+   folder rather than an overwrite (see `embeddings_provenance.md`).
+2. Re-run calibration + evaluation with the matching `--model <id>` (calibrate
+   asserts the loaded sidecars match the requested variant) and compare the
+   headline metric (**false-positive rate on look-alikes**, alongside Indy
+   recall) against the dinov2-base baseline. Let the numbers decide the backbone.

@@ -19,6 +19,7 @@ What exists so far against this design:
 - **Shared rendering primitives — done (E0 prerequisite).** The accessibility-critical markup §7 calls out is extracted into `scripts/calibration/report_common.py`: `fmt`/`fmt_html` (the NaN→dash / NaN→en-dash formatters), `rel_src`/`figure` (relative-`src` and `<figure>` helpers), the shared `HTML_STYLE`, and a generic scoped-header `scoped_table` builder. `report_html.py` and `report_text.py` now build on it (output unchanged — the existing tests assert exact `src=`/`alt=`/`<table>`/heading substrings), so the screen-reader table semantics live in exactly one place and the future `evaluate_report_html.py` cannot drift from them. Covered by added unit tests in `tests/test_calibration_report.py`.
 - **Evaluation tool — done (E0).** `scripts/calibration/evaluate.py` is the honest-grade command of §7 (entry point `scripts/evaluate.py`, the same shim pattern as calibrate): it loads a frozen artifact (`load_artifact`, asserting `format_version` + `gallery_fingerprint` loudly) and the manifest's **`test` roles only**, then scores them against the **artifact's bundled gallery** under the **frozen `aggregation`** (read from the artifact, never a CLI flag) and applies the frozen `threshold` verbatim — the only place the `test` role is ever read, with no sweep and no policy pick. The **disjointness guard** (`set(manifest.indy_gallery) == artifact gallery`) and the **empty-test guard** are loud `SplitConfigError`s, defending the `--manifest` override against silently inflating recall by self-matching. The numbers reuse `calibration.metrics` so they cannot diverge from calibrate's math: the frozen threshold is a **single-element `build_sweep`/`build_breed_sweep`**, and a new `Confusion`/`confusion_at` helper in `metrics.py` gives the TP/FN/FP/TN counts (`>=` convention). Output is **both text (stdout) and semantic HTML** (`--html`, bare flag auto-names `eval-<artifact-stem>.html` into `data/reports/`) from E0: a confusion matrix, headline rates (with the honest look-alike caveat — breeds also seen during calibration, *not* the unseen-breed exam), per-breed FPR at the frozen cutoff, and the calibration-vs-test **drift table** (mapping the artifact's `metrics_at_threshold` keys to the `SweepRow` attributes). The HTML renderer (`evaluate_report_html.py`) builds **only** on `report_common`, so the scoped-`<table>` semantics stay in one place. `--scores-out` and the error-list **images** are deferred to E1. Covered by `tests/test_evaluate.py`. Measured on the baseline split, the frozen threshold ≈0.72 grades the held-out exam at **recall 0.90 / FPR(all) 0.019 / FPR(look-alike) 0.054** (vs the calibration-split 1.00 / 0.017 / 0.048 — a small, visible generalization gap), with `Maine_Coon` the lone high-FPR breed.
 - **Evaluation tool — done (E1).** `evaluate.py` gains the §7 error lists and `--scores-out`. A shared `report_common.figure_list` (a `Protocol`-typed, best-match-dir-parameterized extraction of calibrate's risk-list markup, so the figure-row screen-reader markup lives in one place) renders both reports; calibrate's `_html_risk_list` now delegates to it. `metrics.select_error_rows` is the threshold-based sibling of `select_risk_rows`: the **actual** mistakes at the frozen cutoff — false positives (negatives with `score >= threshold`, worst-first) and false negatives (positives below it) — **uncapped** (every error shown, not the top-N risk cap), so the text report and the crop-embedding HTML report cannot disagree on what counts as an error. `evaluate_report_text.write_scores_csv` writes per-image test scores joined with provenance plus a frozen-`verdict` column unique to evaluate (`role, source_filename, score, verdict, best_match, breed`); the HTML renderer now threads `html_path` for relative image `src`. The CLI adds `--scores-out` (explicit path, no auto-name, like calibrate). Covered by added tests in `tests/test_evaluate.py`. Measured on the baseline artifact, the held-out grade surfaces **13 false positives (11 Maine_Coon + 1 Persian + 1 Ragdoll, scores 0.72–0.81) and 1 false negative** (`standing_floor_side_07.jpg` at 0.706, just under the ≈0.72 cutoff) — the recall-0.90 / FPR-0.019 numbers made concrete and inspectable.
+- **Embedding provenance — done.** The model + crop identity is now carried through the manifest, artifact, and predict app rather than thrown away ([`embeddings_provenance.md`](embeddings_provenance.md) is the authoritative spec). Caches live in a variant-nested layout (`data/embeddings/<dataset>/<model_slug>/<crop_slug>/`) with an `embeddings.meta.yaml` sidecar; the **manifest bumps to format v2** (an `embedding` provenance block in the header) and the **artifact to format v2** (an operative `embedding` block). Calibrate gains scoring flags `--model`/`--no-detect`/`--margin` selecting the cache variant, and a net of loud `variant_key` assertions keeps a query from being scored against a cache built with a different backbone or crop. Details in the format subsections of §3 and §5 below; the assertion net is summarized in `embeddings_provenance.md`.
 - **Not yet started:** `evaluate.py` **E2** (optional, e.g. a gallery dump — only if it earns its place). `leave_one_out` is unimplemented (the `strategy` string is stored; only `three_way` is generated).
 
 ## 1. The decision (the live path)
@@ -91,6 +92,10 @@ When a *guaranteed* fixed exam is wanted (e.g. across many experiments), the wri
 
 The manifest references only images that are actually embedded (rows in `metadata.csv`), not the catalog — Oxford's no-cat misses have no vector to score. Disjointness of the role sets is **asserted mechanically at load**; a non-empty intersection is a loud failure.
 
+#### Format v2 — the embedding provenance block
+
+`MANIFEST_FORMAT_VERSION` is now **2** (`load_manifest` rejects any other version loudly, so pre-provenance v1 manifests fail by design — see [`embeddings_provenance.md`](embeddings_provenance.md) Migration). The header carries an `embedding` block — `model_id`, `detect`, `margin`, `min_confidence` — recording **the variant the frozen lists were drawn against**, not just encoding it in the filename. This matters because crop settings change *which* images are embedded (detect-off embeds the Oxford no-cat misses detect-on skips), so two manifests differing only by crop are genuinely different splits; carrying the variant in the data lets a replay be **cross-checked** against the caches it scores over (§4 "Variant selection") rather than trusted by name. `margin`/`min_confidence` are `null` when `detect` is off, matching the sidecar's normalized `variant_key`. The block is set at generation from the loaded sidecars' shared variant — `manifest.py` owns no I/O, so calibrate (which owns the cache loading) supplies it. Serialized in `manifest_to_dict`, read back in `manifest_from_dict`; an `EmbeddingProvenance.variant_key()` mirrors the sidecar's for the replay assert.
+
 ### Indy vs. Oxford selection
 
 - **Indy** is always materialized (35 photos, meaningful names). The automated selector is random-but-seeded; an optional `prefer` knob can bias the gallery toward `head_visible` / `tail_visible` photos (text fields in `mapping.csv`), since those carry the most identifying information. **`prefer` is off for the baseline.** Because the test split is drawn first (§"Test split first"), skimming the head/tail-visible photos into the gallery leaves the *calibration positives* with the weaker photos — distorting the very positive distribution V0 exists to measure. So biased-gallery is strictly a later, labelled experiment (§8); the default run keeps selection unbiased. A **manual** path — hand-edit the YAML, optionally aided by the existing `data_review` app surfacing `mapping.csv` attributes — produces a manifest in the same format. Hand-picked-vs-random gallery is itself a measurable experiment.
@@ -121,6 +126,22 @@ calibrate --manifest splits/run-<...>.yaml
 - `--aggregation max | mean-top3` selects the scoring choice (default `max`).
 - `--scores-out <csv>` optionally writes per-image scores for inspection.
 - `--random-seed` still **records the seed it drew** into the written manifest, so even an exploratory run is reproducible afterward.
+
+### Variant selection (which cache to score against)
+
+Calibrate scores against an embeddings *variant* — the model + crop setting a cache was built with. Three **scoring** flags pick it (they compose with `--manifest`; they are *not* generation flags):
+
+- `--model <id>` (default `facebook/dinov2-base`) — the embedding backbone.
+- `--no-detect` — select the full-frame (`nocrop`) cache instead of the cropped one.
+- `--margin <f>` (default `0.1`, ignored under `--no-detect`) — the crop margin.
+
+These resolve the indy + oxford cache dirs (`data/embeddings/<dataset>/<model_slug>/<crop_slug>/`), loaded with their sidecars via `load_embeddings_variant`. The variant slug is also threaded into the auto-named manifest/report/artifact (load-bearing for the manifest, since crop settings change the split). The identity is then asserted three ways, each a loud `SplitConfigError` — the same no-silently-wrong-numbers discipline as the row-count and fingerprint checks:
+
+1. **each loaded sidecar's `(model, detect, margin)` == the CLI-requested variant** — catches `--margin 0.2` landing on a 0.1 cache, or a sidecar disagreeing with its folder.
+2. **indy sidecar `variant_key()` == oxford sidecar `variant_key()`** — the identical-footing guard, and the *only* available check for `min_confidence` (it has no CLI flag).
+3. **on `--manifest` replay, the manifest header's variant == the loaded sidecars' `variant_key()`** — so a manifest generated `nocrop` (whose Oxford lists include the no-cat-miss filenames) replayed with crop-on flags fails cleanly here rather than dying on a raw `KeyError` deep in scoring.
+
+On a generated run the shared variant is written into the manifest header (format v2) and into the artifact's `embedding` block. The full rationale and the assertion-net summary table live in [`embeddings_provenance.md`](embeddings_provenance.md).
 
 ### The default run
 
@@ -177,6 +198,7 @@ The artifact is the frozen output of calibration and the input to both the live 
 - **`aggregation`** — `max` | `mean-top3`. The threshold is only meaningful under the aggregation that produced it, so decide must score with the same one. This is why aggregation is deliberately *out* of the manifest (§3) but *in* here.
 - **`comparison`** — recorded explicitly as `">="` (`score >= threshold` → Indy). Fixed in code, but a frozen artifact should not leave the convention implicit.
 - **`gallery`** — the binding that makes the threshold valid only for *this* gallery: the companion `vectors` file, a `fingerprint` (loud drift check), `count`, and per-row `source_filename` + `position`/`view` so decide can still name the best-matching gallery photo (§1's inspectable output) without `mapping.csv`.
+- **`embedding`** (format v2) — the variant the gallery was built with: `model_id`, `embedding_dim`, `detect`, `margin`, `min_confidence` (`margin`/`min_confidence` `null` when detect is off). This is what closes the live loop: the predict app loads `Embedder(model_id)` and a detector at `min_confidence`/`detect`/`margin` from here, so the live detect→crop→embed matches the gallery's footing rather than silently using constructor defaults — the same-dim-swap footgun the provenance design exists to prevent ([`embeddings_provenance.md`](embeddings_provenance.md)). `evaluate.py` asserts the test caches' `variant_key` against it; `load_artifact` adds a belt-and-suspenders `embedding_dim == vector-width` cross-check (a same-dim swap passes that — it is caught by `model_id` flowing into the artifact and the calibrate/evaluate variant asserts, not the dim check).
 
 **Provenance + curve (audit, not consumed at decide time):**
 
@@ -189,12 +211,18 @@ The artifact is the frozen output of calibration and the input to both the live 
 Illustrative `calibration.yaml`:
 
 ```yaml
-format_version: 1
+format_version: 2
 
 # operative — read by decide
 threshold: 0.7213
 aggregation: max
 comparison: ">="
+embedding:                        # the variant the gallery was built with (v2)
+  model_id: facebook/dinov2-base
+  embedding_dim: 768
+  detect: true
+  margin: 0.1                     # null when detect off
+  min_confidence: 0.25            # null when detect off
 gallery:
   vectors: gallery.npy            # raw vectors, row-aligned to images below
   fingerprint: sha256:...         # loud drift check
@@ -235,7 +263,7 @@ Three, each with a single clear source:
 
 - **The frozen artifact** (`load_artifact`, already implemented). The binding contract: it supplies the operative `threshold`, `aggregation`, `comparison` (`>=`), and the **bundled raw gallery vectors + `gallery.images` names**. The gallery comes from *here*, never re-derived from the manifest — that is exactly the binding the `gallery_fingerprint` protects, and `load_artifact` already asserts `format_version` and the fingerprint loudly before evaluate scores anything. The `aggregation` is likewise read from the artifact, **not** exposed as a CLI flag: the threshold is only meaningful under the aggregation that produced it, so letting evaluate score under a different one would be a silent footgun.
 - **The manifest**, for the `test` membership only (`indy_test`, `oxford_test`) — which the artifact deliberately does not carry (§5, "Not in the artifact"). It defaults to `artifact.chosen_by.manifest`; `--manifest` overrides it (to grade a different test set drawn from the *same* gallery). The default assumes that recorded path is still resolvable from evaluate's working directory — a generated artifact stores an absolute path (`cli.py` writes `str(out_path)`), but a `--manifest`-replay artifact stores whatever string was typed, which may be relative to a different cwd. When it does not resolve, pass `--manifest` explicitly. This is safe either way: a wrong manifest trips the disjointness guard below and fails loudly rather than grading silently.
-- **The embeddings caches** (`load_cached_embeddings`, already in `scripts/_common.py` "for reuse by `evaluate.py`"), to look up the test images' vectors — the same path calibrate uses.
+- **The embeddings caches** (`load_embeddings_variant`, the provenance-aware wrapper over `load_cached_embeddings` in `scripts/_common.py`), to look up the test images' vectors — the same path calibrate uses. Evaluate takes **no** `--model`/`--margin` flag: the test-set variant dir is resolved from `artifact.embedding.{model_id, detect, margin}`, and each loaded test sidecar's `variant_key()` is asserted equal to the artifact's frozen embedding identity (a loud `SplitConfigError`). A test cache embedded with a different backbone or crop than the gallery would grade the exam on mismatched footing — exactly the silently-wrong accuracy the provenance design prevents — so a drift is a hard error.
 
 ### The disjointness guard
 

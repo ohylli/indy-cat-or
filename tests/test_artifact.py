@@ -18,12 +18,14 @@ from calibration.artifact import (
     ARTIFACT_FORMAT_VERSION,
     AggregationResult,
     CalibrationArtifact,
+    EmbeddingIdentity,
     build_artifact,
     gallery_fingerprint,
     load_artifact,
     write_artifact,
 )
 from calibration.manifest import (
+    EmbeddingProvenance,
     GenerationParams,
     SplitConfigError,
     SplitManifest,
@@ -43,8 +45,14 @@ def make_manifest() -> SplitManifest:
         prefer=None,
     )
     return SplitManifest(
-        format_version=1,
+        format_version=2,
         params=params,
+        embedding=EmbeddingProvenance(
+            model_id="facebook/dinov2-base",
+            detect=True,
+            margin=0.1,
+            min_confidence=0.25,
+        ),
         generated_at="2026-01-01T00:00:00+00:00",
         random_seed_drawn=False,
         indy_gallery=["g0", "g1"],
@@ -85,12 +93,26 @@ def make_results(
     return results
 
 
+def make_embedding(embedding_dim: int = 3) -> EmbeddingIdentity:
+    """The variant identity stamped into the artifact's embedding block."""
+    return EmbeddingIdentity(
+        model_id="facebook/dinov2-base",
+        embedding_dim=embedding_dim,
+        detect=True,
+        margin=0.1,
+        min_confidence=0.25,
+    )
+
+
 def build_default_artifact(
     results: dict[Aggregation, AggregationResult],
     raw_vectors: NDArray[np.float32] | None = None,
+    embedding: EmbeddingIdentity | None = None,
 ) -> CalibrationArtifact:
     if raw_vectors is None:
         raw_vectors = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    if embedding is None:
+        embedding = make_embedding(raw_vectors.shape[1])
     return build_artifact(
         make_manifest(),
         "data/splits/m.yaml",
@@ -99,6 +121,7 @@ def build_default_artifact(
         {"g0": ("lying", "3q"), "g1": ("sitting", "side")},
         results,
         "m.gallery.npy",
+        embedding,
         policy="target-fpr",
         target_fpr=0.05,
         target_fpr_group="look-alike",
@@ -175,6 +198,7 @@ def test_missing_gallery_position_is_loud() -> None:
             {"g0": ("lying", "3q")},  # g1 absent
             results,
             "m.gallery.npy",
+            make_embedding(2),
             policy="target-fpr",
             target_fpr=0.05,
             target_fpr_group="look-alike",
@@ -230,8 +254,42 @@ def test_format_version_mismatch_is_loud(tmp_path: Path) -> None:
     yaml_path = tmp_path / "c.yaml"
     write_artifact(artifact, raw, yaml_path)
     text = yaml_path.read_text(encoding="utf-8").replace(
-        "format_version: 1", "format_version: 2"
+        "format_version: 2", "format_version: 99"
     )
     yaml_path.write_text(text, encoding="utf-8")
     with pytest.raises(SplitConfigError, match="format_version"):
+        load_artifact(yaml_path)
+
+
+def test_format_version_is_two() -> None:
+    assert ARTIFACT_FORMAT_VERSION == 2
+
+
+def test_embedding_block_round_trips(tmp_path: Path) -> None:
+    raw = np.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=np.float32)
+    results = make_results({"max": 0.048, "mean-top3": 0.061})
+    embedding = EmbeddingIdentity(
+        model_id="facebook/dinov2-with-registers-base",
+        embedding_dim=3,
+        detect=True,
+        margin=0.2,
+        min_confidence=0.3,
+    )
+    artifact = build_default_artifact(results, raw_vectors=raw, embedding=embedding)
+    yaml_path = tmp_path / "c.yaml"
+    write_artifact(artifact, raw, yaml_path)
+    loaded, _ = load_artifact(yaml_path)
+    assert loaded.embedding == embedding
+
+
+def test_embedding_dim_vs_vector_width_cross_check_is_loud(tmp_path: Path) -> None:
+    # The artifact declares embedding_dim 2 but the vectors are 3-wide.
+    raw = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    results = make_results({"max": 0.048, "mean-top3": 0.061})
+    artifact = build_default_artifact(
+        results, raw_vectors=raw, embedding=make_embedding(2)
+    )
+    yaml_path = tmp_path / "c.yaml"
+    write_artifact(artifact, raw, yaml_path)
+    with pytest.raises(SplitConfigError, match="embedding_dim"):
         load_artifact(yaml_path)

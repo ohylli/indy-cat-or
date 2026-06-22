@@ -40,14 +40,35 @@ from typing import Any
 
 import yaml
 
+from _common import EmbeddingsVariant
+
 # This file is scripts/calibration/manifest.py, so the repo root is three levels up.
 REPO_ROOT = Path(__file__).parent.parent.parent
-INDY_METADATA = REPO_ROOT / "data" / "embeddings" / "indy" / "metadata.csv"
-INDY_EMBEDDINGS = REPO_ROOT / "data" / "embeddings" / "indy" / "embeddings.npy"
-OXFORD_METADATA = REPO_ROOT / "data" / "embeddings" / "oxford" / "metadata.csv"
-OXFORD_EMBEDDINGS = REPO_ROOT / "data" / "embeddings" / "oxford" / "embeddings.npy"
+
+#: Root under which every dataset's per-variant embeddings cache lives:
+#: ``data/embeddings/<dataset>/<model_slug>/<crop_slug>/``. The flat
+#: ``indy/metadata.csv`` layout is gone -- a cache is now identified by its model
+#: and crop variant, never by a fixed path (see ``docs/embeddings_provenance.md``).
+EMBEDDINGS_ROOT = REPO_ROOT / "data" / "embeddings"
 INDY_MAPPING = REPO_ROOT / "images" / "indy" / "mapping.csv"
 SPLITS_DIR = REPO_ROOT / "data" / "splits"
+
+#: Baseline embedding variant: the no-arg calibrate run resolves to
+#: ``facebook--dinov2-base/crop-m0.1`` under each dataset root.
+DEFAULT_MODEL = "facebook/dinov2-base"
+DEFAULT_DETECT = True
+DEFAULT_MARGIN = 0.1
+
+
+def indy_variant_dir(variant: EmbeddingsVariant) -> Path:
+    """The Indy cache dir for ``variant`` under ``EMBEDDINGS_ROOT/indy``."""
+    return variant.dir(EMBEDDINGS_ROOT / "indy")
+
+
+def oxford_variant_dir(variant: EmbeddingsVariant) -> Path:
+    """The Oxford cache dir for ``variant`` under ``EMBEDDINGS_ROOT/oxford``."""
+    return variant.dir(EMBEDDINGS_ROOT / "oxford")
+
 
 #: Source-image directories, keyed to the ``source_filename`` columns: Indy's
 #: ``metadata.csv`` names live directly in ``images/indy/`` and Oxford's under
@@ -70,7 +91,7 @@ DEFAULT_CALIBRATION = 10
 DEFAULT_TEST = 10
 DEFAULT_OXFORD_TEST_FRACTION = 0.30
 
-MANIFEST_FORMAT_VERSION = 1
+MANIFEST_FORMAT_VERSION = 2
 STRATEGY_THREE_WAY = "three_way"
 
 #: Recognised ``prefer`` knobs: bias the gallery toward photos whose head or tail
@@ -100,6 +121,35 @@ class OxfordRecord:
 
 
 @dataclass(frozen=True)
+class EmbeddingProvenance:
+    """The embedding variant the manifest's frozen lists were drawn against.
+
+    Recorded in the manifest header so a replay can be *cross-checked* against the
+    caches it is scored over, not merely trusted by filename (invariant #1 of
+    ``docs/embeddings_provenance.md``). ``margin``/``min_confidence`` are ``None``
+    when ``detect`` is off, matching :class:`_common.EmbeddingsMeta`'s normalized
+    :meth:`variant_key`. It is set at generation from the loaded sidecars' shared
+    variant -- ``manifest.py`` owns no I/O, so the caller (calibrate) supplies it.
+    """
+
+    model_id: str
+    detect: bool
+    margin: float | None
+    min_confidence: float | None
+
+    def variant_key(self) -> tuple[str, bool, float | None, float | None]:
+        """Normalized identity matching :meth:`EmbeddingsMeta.variant_key`.
+
+        ``(model_id, detect, margin, min_confidence)`` with ``margin`` and
+        ``min_confidence`` forced to ``None`` when ``detect`` is false, so a
+        manifest header compares equal to the sidecars it was drawn against.
+        """
+        if not self.detect:
+            return (self.model_id, self.detect, None, None)
+        return (self.model_id, self.detect, self.margin, self.min_confidence)
+
+
+@dataclass(frozen=True)
 class GenerationParams:
     """The knobs that decide membership; recorded verbatim in the manifest header.
 
@@ -126,6 +176,7 @@ class SplitManifest:
 
     format_version: int
     params: GenerationParams
+    embedding: EmbeddingProvenance
     generated_at: str
     random_seed_drawn: bool
     indy_gallery: list[str]
@@ -160,7 +211,7 @@ def _parse_yes_no(value: str) -> bool:
 
 
 def load_indy_metadata(
-    metadata_path: Path = INDY_METADATA,
+    metadata_path: Path,
     mapping_path: Path = INDY_MAPPING,
 ) -> list[IndyRecord]:
     """Load embedded Indy photos, joined to ``mapping.csv`` for head/tail flags.
@@ -193,7 +244,7 @@ def load_indy_metadata(
 
 
 def load_oxford_metadata(
-    metadata_path: Path = OXFORD_METADATA,
+    metadata_path: Path,
 ) -> list[OxfordRecord]:
     """Load embedded Oxford cats with breed labels (the negative pool)."""
     records: list[OxfordRecord] = []
@@ -320,12 +371,16 @@ def generate_three_way(
     indy: list[IndyRecord],
     oxford: list[OxfordRecord],
     params: GenerationParams,
+    embedding: EmbeddingProvenance,
     random_seed_drawn: bool = False,
 ) -> SplitManifest:
     """Generate a materialized ``three_way`` manifest from records + params.
 
     Order matters: the test set is drawn *before* gallery/calibration are sliced,
-    so they cannot perturb the exam. Oxford is stratified by breed.
+    so they cannot perturb the exam. Oxford is stratified by breed. ``embedding``
+    is the shared variant the caller resolved the records' caches from; it is
+    recorded in the header so a later replay can be cross-checked against the
+    caches it scores over.
     """
     if params.strategy != STRATEGY_THREE_WAY:
         raise SplitConfigError(
@@ -352,6 +407,7 @@ def generate_three_way(
     return SplitManifest(
         format_version=MANIFEST_FORMAT_VERSION,
         params=params,
+        embedding=embedding,
         generated_at=datetime.now(UTC).isoformat(),
         random_seed_drawn=random_seed_drawn,
         indy_gallery=gallery,
@@ -383,6 +439,12 @@ def manifest_to_dict(manifest: SplitManifest) -> dict[str, Any]:
             "test": manifest.params.test,
             "oxford_test_fraction": manifest.params.oxford_test_fraction,
             "prefer": manifest.params.prefer,
+        },
+        "embedding": {
+            "model_id": manifest.embedding.model_id,
+            "detect": manifest.embedding.detect,
+            "margin": manifest.embedding.margin,
+            "min_confidence": manifest.embedding.min_confidence,
         },
         "oxford_breed_summary": {
             "setup": manifest.oxford_setup_breed_counts,
@@ -425,10 +487,18 @@ def manifest_from_dict(data: dict[str, Any]) -> SplitManifest:
         oxford_test_fraction=params_data["oxford_test_fraction"],
         prefer=params_data["prefer"],
     )
+    embedding_data = data["embedding"]
+    embedding = EmbeddingProvenance(
+        model_id=embedding_data["model_id"],
+        detect=embedding_data["detect"],
+        margin=embedding_data["margin"],
+        min_confidence=embedding_data["min_confidence"],
+    )
     summary = data["oxford_breed_summary"]
     return SplitManifest(
         format_version=data["format_version"],
         params=params,
+        embedding=embedding,
         generated_at=data["generated_at"],
         random_seed_drawn=data["random_seed_drawn"],
         indy_gallery=list(data["indy"]["gallery"]),

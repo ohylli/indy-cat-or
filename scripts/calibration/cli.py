@@ -60,10 +60,17 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from _common import load_cached_embeddings
+from _common import (
+    EmbeddingsMeta,
+    EmbeddingsVariant,
+    crop_slug,
+    load_embeddings_variant,
+    model_slug,
+)
 from calibration.artifact import (
     GALLERY_VECTORS_SUFFIX,
     AggregationResult,
+    EmbeddingIdentity,
     build_artifact,
     load_indy_positions,
     write_artifact,
@@ -72,24 +79,25 @@ from calibration.manifest import (
     ARTIFACTS_DIR,
     DEFAULT_CALIBRATION,
     DEFAULT_GALLERY,
+    DEFAULT_MARGIN,
+    DEFAULT_MODEL,
     DEFAULT_OXFORD_TEST_FRACTION,
     DEFAULT_SEED,
     DEFAULT_TEST,
-    INDY_EMBEDDINGS,
-    INDY_METADATA,
-    OXFORD_EMBEDDINGS,
-    OXFORD_METADATA,
     PREFER_CHOICES,
     REPORTS_DIR,
     SPLITS_DIR,
     STRATEGY_THREE_WAY,
+    EmbeddingProvenance,
     GenerationParams,
     SplitConfigError,
     SplitManifest,
     generate_three_way,
+    indy_variant_dir,
     load_indy_metadata,
     load_manifest,
     load_oxford_metadata,
+    oxford_variant_dir,
     write_manifest,
 )
 from calibration.metrics import (
@@ -241,7 +249,57 @@ def build_parser() -> argparse.ArgumentParser:
         default="look-alike",
         help="which negatives the target-fpr budget applies to (default: look-alike)",
     )
+    # Scoring/variant selection -- which embeddings cache to score against. Not
+    # generation flags (they compose with --manifest); but they pick which cache
+    # the manifest's frozen lists are looked up in, so a replay cross-checks them
+    # against the manifest header's recorded variant.
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"embedding model id selecting the cache variant "
+        f"(default {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--no-detect",
+        action="store_true",
+        help="select the full-frame (nocrop) cache variant instead of the cropped one",
+    )
+    parser.add_argument(
+        "--margin",
+        type=float,
+        default=DEFAULT_MARGIN,
+        help=f"crop margin selecting the cache variant (default {DEFAULT_MARGIN}); "
+        "ignored under --no-detect",
+    )
     return parser
+
+
+def requested_variant(args: argparse.Namespace) -> EmbeddingsVariant:
+    """The cache variant the CLI asked for, from the scoring flags."""
+    return EmbeddingsVariant(
+        model_id=args.model, detect=not args.no_detect, margin=args.margin
+    )
+
+
+def _assert_sidecar_matches_request(
+    meta: EmbeddingsMeta, variant: EmbeddingsVariant, dataset: str
+) -> None:
+    """Loud if a loaded sidecar's ``(model, detect, margin)`` != the CLI request.
+
+    Catches ``--margin 0.2`` landing on a 0.1 cache, or a sidecar whose contents
+    disagree with the folder it sits in. ``min_confidence`` has no CLI flag, so it
+    is not checked here -- the dual-sidecar guard covers it.
+    """
+    expected = variant.margin if variant.detect else None
+    requested = (variant.model_id, variant.detect, expected)
+    found = (meta.model_id, meta.detect, meta.margin if meta.detect else None)
+    if found != requested:
+        raise SplitConfigError(
+            f"{dataset} cache sidecar records (model={meta.model_id!r}, "
+            f"detect={meta.detect}, margin={meta.margin}) but the CLI asked for "
+            f"(model={variant.model_id!r}, detect={variant.detect}, "
+            f"margin={expected}); the cache does not match the requested variant"
+        )
 
 
 def resolve_params(args: argparse.Namespace) -> tuple[GenerationParams, bool]:
@@ -270,15 +328,30 @@ def resolve_params(args: argparse.Namespace) -> tuple[GenerationParams, bool]:
     return params, drawn
 
 
-def default_manifest_name(params: GenerationParams) -> str:
-    """A deterministic, descriptive filename for an auto-saved manifest."""
+def _variant_slug(variant: EmbeddingsVariant) -> str:
+    """``<model_slug>-<crop_slug>`` for an auto-named file.
+
+    The crop slug is the load-bearing part (crop settings change *which* images
+    are embedded, hence the split); the model slug disambiguates backbones.
+    """
+    return f"{model_slug(variant.model_id)}-{crop_slug(variant.detect, variant.margin)}"
+
+
+def default_manifest_name(params: GenerationParams, variant: EmbeddingsVariant) -> str:
+    """A deterministic, descriptive filename for an auto-saved manifest.
+
+    The variant slug is included because crop settings change the split, so two
+    manifests differing only by crop must not collide on one name.
+    """
     return (
         f"{params.strategy}-seed{params.seed}-g{params.gallery}"
-        f"-c{params.calibration}-t{params.test}.yaml"
+        f"-c{params.calibration}-t{params.test}-{_variant_slug(variant)}.yaml"
     )
 
 
-def default_report_name(params: GenerationParams, aggregation: Aggregation) -> str:
+def default_report_name(
+    params: GenerationParams, aggregation: Aggregation, variant: EmbeddingsVariant
+) -> str:
     """A deterministic filename for an auto-saved HTML report.
 
     Parallels :func:`default_manifest_name` but also encodes the ``aggregation``,
@@ -286,11 +359,14 @@ def default_report_name(params: GenerationParams, aggregation: Aggregation) -> s
     """
     return (
         f"report-{params.strategy}-seed{params.seed}-g{params.gallery}"
-        f"-c{params.calibration}-t{params.test}-{aggregation}.html"
+        f"-c{params.calibration}-t{params.test}-{_variant_slug(variant)}"
+        f"-{aggregation}.html"
     )
 
 
-def default_artifact_name(params: GenerationParams, policy: str) -> str:
+def default_artifact_name(
+    params: GenerationParams, policy: str, variant: EmbeddingsVariant
+) -> str:
     """A deterministic filename for an auto-saved calibration artifact.
 
     The operative aggregation is auto-selected (the winner of the max-vs-mean-top3
@@ -298,7 +374,7 @@ def default_artifact_name(params: GenerationParams, policy: str) -> str:
     """
     return (
         f"calibration-{params.strategy}-seed{params.seed}-g{params.gallery}"
-        f"-c{params.calibration}-t{params.test}-{policy}.yaml"
+        f"-c{params.calibration}-t{params.test}-{_variant_slug(variant)}-{policy}.yaml"
     )
 
 
@@ -320,6 +396,12 @@ def summarize(manifest: SplitManifest) -> str:
 def run_calibration(
     manifest: SplitManifest,
     label: str,
+    indy_names: list[str],
+    indy_vectors: NDArray[np.float32],
+    oxford_names: list[str],
+    oxford_vectors: NDArray[np.float32],
+    breeds: dict[str, str],
+    embedding: EmbeddingIdentity,
     aggregation: Aggregation,
     scores_out: Path | None,
     html_out: Path | None,
@@ -337,14 +419,13 @@ def run_calibration(
     (V2), an explicit threshold is picked and reported too. When ``artifact_out``
     is set (V3, requires ``policy``), the frozen calibration artifact is written.
     The ``test`` role is never read here -- that is ``evaluate.py``'s job.
+
+    The embeddings caches are loaded by :func:`main` (it owns the variant
+    selection + cross-checks); the loaded names/vectors/breeds and the shared
+    ``embedding`` identity are passed in so this stays I/O-light.
     """
-    indy_names, indy_vectors = load_cached_embeddings(INDY_METADATA, INDY_EMBEDDINGS)
-    oxford_names, oxford_vectors = load_cached_embeddings(
-        OXFORD_METADATA, OXFORD_EMBEDDINGS
-    )
     indy_lookup = build_name_to_vector(indy_names, indy_vectors)
     oxford_lookup = build_name_to_vector(oxford_names, oxford_vectors)
-    breeds = {record.source_filename: record.breed for record in load_oxford_metadata()}
 
     raw_gallery_vectors = select_vectors(manifest.indy_gallery, indy_lookup)
     gallery = Gallery.from_raw(manifest.indy_gallery, raw_gallery_vectors)
@@ -402,6 +483,7 @@ def run_calibration(
             indy_lookup,
             oxford_lookup,
             breeds,
+            embedding,
             artifact_out,
             policy=policy,
             target_fpr=target_fpr,
@@ -418,6 +500,7 @@ def _write_calibration_artifact(
     indy_lookup: dict[str, NDArray[np.float32]],
     oxford_lookup: dict[str, NDArray[np.float32]],
     breeds: dict[str, str],
+    embedding: EmbeddingIdentity,
     artifact_out: Path,
     *,
     policy: PickPolicy,
@@ -450,6 +533,7 @@ def _write_calibration_artifact(
         load_indy_positions(),
         results,
         artifact_out.stem + GALLERY_VECTORS_SUFFIX,
+        embedding,
         policy=policy,
         target_fpr=target_fpr,
         target_fpr_group=target_group,
@@ -485,21 +569,70 @@ def main(argv: list[str] | None = None) -> None:
             "--artifact requires --policy (an artifact must freeze a chosen threshold)"
         )
 
+    variant = requested_variant(args)
     try:
+        # Load both caches up front: calibrate owns variant selection + the loud
+        # cross-checks (manifest.py owns no I/O). Even --generate-only needs them,
+        # since the manifest header's embedding block (incl. min_confidence, which
+        # has no CLI flag) is read from the loaded sidecars' shared variant.
+        indy_names, indy_vectors, indy_meta = load_embeddings_variant(
+            indy_variant_dir(variant)
+        )
+        oxford_names, oxford_vectors, oxford_meta = load_embeddings_variant(
+            oxford_variant_dir(variant)
+        )
+        # Check 1: each loaded sidecar matches the requested (model, detect, margin).
+        _assert_sidecar_matches_request(indy_meta, variant, "Indy")
+        _assert_sidecar_matches_request(oxford_meta, variant, "Oxford")
+        # Check 2: identical footing -- indy and oxford were embedded the same way.
+        # This is also the only available check for min_confidence (no CLI flag).
+        if indy_meta.variant_key() != oxford_meta.variant_key():
+            raise SplitConfigError(
+                f"Indy cache variant {indy_meta.variant_key()} != Oxford cache "
+                f"variant {oxford_meta.variant_key()}; positives and negatives were "
+                "not embedded on identical footing"
+            )
+        shared_key = indy_meta.variant_key()
+        embedding = EmbeddingIdentity(
+            model_id=indy_meta.model_id,
+            embedding_dim=indy_meta.embedding_dim,
+            detect=shared_key[1],
+            margin=shared_key[2],
+            min_confidence=shared_key[3],
+        )
+        provenance = EmbeddingProvenance(
+            model_id=shared_key[0],
+            detect=shared_key[1],
+            margin=shared_key[2],
+            min_confidence=shared_key[3],
+        )
+
         if args.manifest is not None:
             manifest = load_manifest(Path(args.manifest))
+            # Check 3: a replayed manifest's recorded variant must match the caches
+            # it is about to be scored over -- a nocrop-generated manifest replayed
+            # with crop-on flags fails here, not on a KeyError deep in scoring.
+            if manifest.embedding.variant_key() != shared_key:
+                raise SplitConfigError(
+                    f"{args.manifest} was generated against variant "
+                    f"{manifest.embedding.variant_key()} but the loaded caches are "
+                    f"{shared_key}; replaying it against a different variant would "
+                    "score the frozen lists against the wrong embeddings"
+                )
             label = args.manifest
             print(f"Loaded manifest: {args.manifest}")
             print(summarize(manifest))
         else:
             params, drawn = resolve_params(args)
-            indy = load_indy_metadata()
-            oxford = load_oxford_metadata()
-            manifest = generate_three_way(indy, oxford, params, random_seed_drawn=drawn)
+            indy = load_indy_metadata(indy_variant_dir(variant) / "metadata.csv")
+            oxford = load_oxford_metadata(oxford_variant_dir(variant) / "metadata.csv")
+            manifest = generate_three_way(
+                indy, oxford, params, provenance, random_seed_drawn=drawn
+            )
             out_path = (
                 Path(args.out)
                 if args.out is not None
-                else SPLITS_DIR / default_manifest_name(params)
+                else SPLITS_DIR / default_manifest_name(params, variant)
             )
             write_manifest(manifest, out_path)
             label = str(out_path)
@@ -507,11 +640,17 @@ def main(argv: list[str] | None = None) -> None:
             print(summarize(manifest))
 
         if not args.generate_only:
+            breeds = {
+                record.source_filename: record.breed
+                for record in load_oxford_metadata(
+                    oxford_variant_dir(variant) / "metadata.csv"
+                )
+            }
             if args.html is None:
                 html_out = None
             elif args.html == _HTML_AUTO:
                 html_out = REPORTS_DIR / default_report_name(
-                    manifest.params, args.aggregation
+                    manifest.params, args.aggregation, variant
                 )
             else:
                 html_out = Path(args.html)
@@ -519,13 +658,19 @@ def main(argv: list[str] | None = None) -> None:
                 artifact_out = None
             elif args.artifact == _ARTIFACT_AUTO:
                 artifact_out = ARTIFACTS_DIR / default_artifact_name(
-                    manifest.params, args.policy
+                    manifest.params, args.policy, variant
                 )
             else:
                 artifact_out = Path(args.artifact)
             run_calibration(
                 manifest,
                 label,
+                indy_names,
+                indy_vectors,
+                oxford_names,
+                oxford_vectors,
+                breeds,
+                embedding,
                 args.aggregation,
                 Path(args.scores_out) if args.scores_out is not None else None,
                 html_out,

@@ -48,6 +48,11 @@ class Embedder:
         model: str = "facebook/dinov2-base",
         device: str | None = None,
     ) -> None:
+        # Keep the model id rather than discarding it after load: the embedding
+        # provenance layer (sidecar + calibration artifact) records *which*
+        # model built a gallery so a query is never scored against a cache from
+        # a different backbone. See docs/embeddings_provenance.md.
+        self.model_id = model
         self.device = device or _default_device()
         self._processor = AutoImageProcessor.from_pretrained(model)
         self._model = AutoModel.from_pretrained(model)

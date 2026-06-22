@@ -16,8 +16,10 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from calibration.artifact import (
+    ARTIFACT_FORMAT_VERSION,
     CalibrationArtifact,
     ChosenBy,
+    EmbeddingIdentity,
     GalleryImageRef,
     MetricsAtThreshold,
 )
@@ -32,8 +34,12 @@ from predict_app import predict
 
 
 class FakeDetector(CatDetector):
+    # Subclasses CatDetector to pass type checks but skips super().__init__ (no
+    # YOLO weights). It mirrors the real attributes the core may read:
+    # ``min_confidence`` (constructor default) is set so nothing trips over it.
     def __init__(self, detections: list[Detection]) -> None:
         self._detections = detections
+        self.min_confidence = 0.25
         self.detect_calls = 0
 
     def detect(self, image: Image.Image) -> DetectionResult:
@@ -42,9 +48,18 @@ class FakeDetector(CatDetector):
 
 
 class FakeEmbedder(Embedder):
-    def __init__(self, vectors: list[list[float]]) -> None:
+    # Skips super().__init__ (no DINOv2 weights), so it must set the attributes
+    # the core reads itself: ``model_id`` (provenance) and ``embedding_dim``
+    # (the bundle-build width guard).
+    def __init__(self, vectors: list[list[float]], dim: int = 2) -> None:
         self._vectors = [np.asarray(v, dtype=np.float32) for v in vectors]
+        self.model_id = "fake/dinov2-base"
+        self._dim = dim
         self.embed_calls = 0
+
+    @property
+    def embedding_dim(self) -> int:
+        return self._dim
 
     def embed(self, image: Image.Image) -> NDArray[np.float32]:
         vector = self._vectors[self.embed_calls]
@@ -152,6 +167,62 @@ def test_multiple_crops_indy_if_any_clears_threshold() -> None:
     assert [c.index for c in result.crops] == [0, 1]
 
 
+def test_classify_passes_margin_into_detect_and_crop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The crop margin from the artifact must reach detect_and_crop, not the default."""
+    gallery, positions = basis_gallery()
+    seen: list[float] = []
+
+    def fake_detect_and_crop(
+        image: Image.Image, detector: CatDetector, margin: float = 0.1
+    ) -> list[tuple[Detection, Image.Image]]:
+        seen.append(margin)
+        return [(a_detection(), image)]
+
+    monkeypatch.setattr(predict, "detect_and_crop", fake_detect_and_crop)
+    predict.classify(
+        square(),
+        detector=FakeDetector([a_detection()]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        gallery=gallery,
+        positions=positions,
+        threshold=0.8,
+        aggregation="max",
+        detect=True,
+        margin=0.25,
+    )
+    assert seen == [0.25]
+
+
+def test_classify_margin_none_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """margin=None (detect was off in the artifact) uses DEFAULT_MARGIN, not a stray."""
+    gallery, positions = basis_gallery()
+    seen: list[float] = []
+
+    def fake_detect_and_crop(
+        image: Image.Image, detector: CatDetector, margin: float = 0.1
+    ) -> list[tuple[Detection, Image.Image]]:
+        seen.append(margin)
+        return [(a_detection(), image)]
+
+    monkeypatch.setattr(predict, "detect_and_crop", fake_detect_and_crop)
+    predict.classify(
+        square(),
+        detector=FakeDetector([a_detection()]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        gallery=gallery,
+        positions=positions,
+        threshold=0.8,
+        aggregation="max",
+        detect=True,
+        margin=None,
+    )
+    assert seen == [predict.DEFAULT_MARGIN]
+
+
 # --------------------------------------------------------------------------- #
 # classify: detect off, and the comparison guard
 # --------------------------------------------------------------------------- #
@@ -204,10 +275,17 @@ def test_unsupported_comparison_raises() -> None:
 def _artifact(gallery_images: list[GalleryImageRef]) -> CalibrationArtifact:
     """A minimal artifact carrying just the gallery refs build_gallery reads."""
     return CalibrationArtifact(
-        format_version=1,
+        format_version=ARTIFACT_FORMAT_VERSION,
         threshold=0.5,
         aggregation="max",
         comparison=">=",
+        embedding=EmbeddingIdentity(
+            model_id="facebook/dinov2-base",
+            embedding_dim=2,
+            detect=True,
+            margin=0.1,
+            min_confidence=0.25,
+        ),
         gallery_vectors_file="x.gallery.npy",
         gallery_fingerprint="sha256:0",
         gallery_count=len(gallery_images),
@@ -233,6 +311,24 @@ def test_build_gallery_aligns_names_and_positions() -> None:
     norms = np.linalg.norm(gallery.vectors, axis=1)
     np.testing.assert_allclose(norms, [1, 1], atol=1e-6)
     assert positions == {"a.jpg": ("lying", "side"), "b.jpg": ("sitting", "front")}
+
+
+def test_build_gallery_guards_live_embedder_width() -> None:
+    """A live backbone whose width disagrees with the gallery is a loud failure."""
+    from calibration.manifest import SplitConfigError
+
+    artifact = _artifact([GalleryImageRef("a.jpg", "lying", "side")])
+    raw = np.array([[1.0, 0.0]], dtype=np.float32)  # 2-dim gallery
+    wrong = FakeEmbedder([], dim=3)  # 3-dim backbone
+    with pytest.raises(SplitConfigError, match="match the one the gallery"):
+        predict.build_gallery(artifact, raw, wrong)
+
+
+def test_build_gallery_accepts_matching_embedder() -> None:
+    artifact = _artifact([GalleryImageRef("a.jpg", "lying", "side")])
+    raw = np.array([[1.0, 0.0]], dtype=np.float32)
+    gallery, _ = predict.build_gallery(artifact, raw, FakeEmbedder([], dim=2))
+    assert gallery.names == ("a.jpg",)
 
 
 def test_find_artifacts_lists_yaml_sorted_excluding_companions(
