@@ -8,6 +8,7 @@ here.
 """
 
 import csv
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import numpy as np
 import yaml
 from numpy.typing import NDArray
 from PIL import Image, ImageOps
+from tqdm import tqdm
 
 from indycat.detection import Detection
 from indycat.embedding import Embedder
@@ -69,21 +71,60 @@ def iter_images(directory: Path) -> list[Path]:
     )
 
 
-def embed_in_batches(
-    embedder: Embedder, images: list[Image.Image], batch_size: int
-) -> np.ndarray:
-    """Embed ``images`` in chunks so large datasets don't blow up GPU memory.
+def embed_stream[R](
+    embedder: Embedder,
+    items: Iterable[tuple[R, Image.Image] | None],
+    batch_size: int,
+    total: int | None,
+    desc: str,
+) -> tuple[list[R], NDArray[np.float32]]:
+    """Embed a lazy stream of ``(row, crop)`` items, batch by batch.
 
-    For Indy's ~35 crops one batch would do, but the chunking is what lets this
-    same routine scale to the ~2400 Oxford crops.
+    Generic over the row-provenance type ``R`` (``GalleryRow`` / ``OxfordRow``):
+    it is carried through untouched and returned row-aligned with the vectors.
+
+    The builders feed this a generator that detects+crops one image at a time,
+    yielding ``(row, crop)`` for a kept crop or ``None`` for a skip (no cat
+    detected). This pulls items until it has ``batch_size`` crops, runs one
+    forward pass, keeps the vectors, and drops the crops before pulling more --
+    so peak memory is a single batch of crops, not the whole dataset's worth.
+    That interleaving is the point: previously every crop was held in memory
+    while detection ran over the full set, then embedded; now detect and embed
+    advance together.
+
+    ``rows`` (small dataclasses) are cheap to accumulate and are returned
+    row-aligned with the stacked vectors -- skips contribute neither a row nor a
+    vector. The ``tqdm`` bar advances once per input item (skips included, so it
+    reaches ``total``), giving live progress over the slow detect+embed pass.
     """
-    if not images:
-        return np.empty((0, embedder.embedding_dim), dtype=np.float32)
-    chunks = [
-        embedder.embed_batch(images[start : start + batch_size])
-        for start in range(0, len(images), batch_size)
-    ]
-    return np.concatenate(chunks, axis=0)
+    rows: list[R] = []
+    chunks: list[NDArray[np.float32]] = []
+    batch_rows: list[R] = []
+    batch_crops: list[Image.Image] = []
+
+    def flush() -> None:
+        if not batch_crops:
+            return
+        chunks.append(embedder.embed_batch(batch_crops))
+        rows.extend(batch_rows)
+        batch_rows.clear()
+        batch_crops.clear()
+
+    with tqdm(total=total, desc=desc, unit="img") as bar:
+        for item in items:
+            bar.update(1)
+            if item is None:
+                continue
+            row, crop = item
+            batch_rows.append(row)
+            batch_crops.append(crop)
+            if len(batch_crops) == batch_size:
+                flush()
+        flush()
+
+    if not chunks:
+        return rows, np.empty((0, embedder.embedding_dim), dtype=np.float32)
+    return rows, np.concatenate(chunks, axis=0)
 
 
 def load_cached_embeddings(

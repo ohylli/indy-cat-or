@@ -47,6 +47,7 @@ import argparse
 import csv
 import time
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,7 +60,7 @@ from _common import (
     EmbeddingsMeta,
     EmbeddingsVariant,
     base_metadata_cells,
-    embed_in_batches,
+    embed_stream,
     load_image,
     write_embeddings_meta,
 )
@@ -245,28 +246,35 @@ def main() -> None:
         else CatDetector(model="yolo11x.pt", min_confidence=args.min_confidence)
     )
 
-    crops: list[Image.Image] = []
-    rows: list[OxfordRow] = []
-    misses = 0
-    for cat in cats:
-        image = load_image(cat.path)
-        if detector is None:
-            crops.append(image)
-            rows.append(OxfordRow(cat.source_filename, cat.breed, None))
-            continue
-        pairs = detect_and_crop(image, detector, args.margin)
-        if not pairs:
-            misses += 1
-            continue
-        # Highest-confidence detection is the cat; extras would be background.
-        detection, crop = pairs[0]
-        crops.append(crop)
-        rows.append(OxfordRow(cat.source_filename, cat.breed, detection))
+    misses = [0]
 
-    print(f"\nLoading embedder ({args.model})...")
+    def detect_crop_stream() -> Iterator[tuple[OxfordRow, Image.Image] | None]:
+        """Detect+crop one cat at a time so the embedder consumes batches.
+
+        Yields ``(row, crop)`` for a kept crop or ``None`` for a no-cat skip;
+        ``misses[0]`` tallies the skips for the closing summary. Unlike the Indy
+        builder this stays quiet per image -- 2400 lines would bury the bar.
+        """
+        for cat in cats:
+            image = load_image(cat.path)
+            if detector is None:
+                yield OxfordRow(cat.source_filename, cat.breed, None), image
+                continue
+            pairs = detect_and_crop(image, detector, args.margin)
+            if not pairs:
+                misses[0] += 1
+                yield None
+                continue
+            # Highest-confidence detection is the cat; extras would be background.
+            detection, crop = pairs[0]
+            yield OxfordRow(cat.source_filename, cat.breed, detection), crop
+
+    print(f"Loading embedder ({args.model})...")
     embedder = Embedder(model=args.model)
     start = time.perf_counter()
-    embeddings = embed_in_batches(embedder, crops, args.batch_size)
+    rows, embeddings = embed_stream(
+        embedder, detect_crop_stream(), args.batch_size, total=len(cats), desc="oxford"
+    )
     elapsed = time.perf_counter() - start
 
     np.save(out_dir / "embeddings.npy", embeddings)
@@ -292,9 +300,9 @@ def main() -> None:
         f"of dim {embedder.embedding_dim} written to {out_dir}"
     )
     print(f"  device: {embedder.device}")
-    print(f"  embedded in {elapsed:.1f}s")
+    print(f"  detected + embedded in {elapsed:.1f}s")
     if detector is not None:
-        print(f"  {misses} with NO cat detected (skipped)")
+        print(f"  {misses[0]} with NO cat detected (skipped)")
 
 
 if __name__ == "__main__":

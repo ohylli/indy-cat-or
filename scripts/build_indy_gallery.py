@@ -37,10 +37,12 @@ Usage:
 
 import argparse
 import csv
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 from _common import (
     BASE_METADATA_COLUMNS,
@@ -48,7 +50,7 @@ from _common import (
     EmbeddingsVariant,
     GalleryRow,
     base_metadata_cells,
-    embed_in_batches,
+    embed_stream,
     iter_images,
     load_image,
     write_embeddings_meta,
@@ -137,31 +139,39 @@ def main() -> None:
         else CatDetector(model="yolo11x.pt", min_confidence=args.min_confidence)
     )
 
-    crops: list[Image.Image] = []
-    rows: list[GalleryRow] = []
     no_cat: list[str] = []
-    for path in photos:
-        image = load_image(path)
-        if detector is None:
-            crops.append(image)
-            rows.append(GalleryRow(path.name, None))
-            print(f"{path.name}: full frame (detect off)")
-            continue
-        pairs = detect_and_crop(image, detector, args.margin)
-        if not pairs:
-            no_cat.append(path.name)
-            print(f"{path.name}: NO CAT DETECTED -- skipped")
-            continue
-        # Highest-confidence detection is Indy; any extras are errors.
-        detection, crop = pairs[0]
-        crops.append(crop)
-        rows.append(GalleryRow(path.name, detection))
-        extra = f" ({len(pairs)} detections, kept top)" if len(pairs) > 1 else ""
-        print(f"{path.name}: confidence {detection.confidence:.2f}{extra}")
 
-    print(f"\nLoading embedder ({args.model})...")
+    def detect_crop_stream() -> Iterator[tuple[GalleryRow, Image.Image] | None]:
+        """Detect+crop one photo at a time so the embedder consumes batches.
+
+        Yields ``(row, crop)`` for a kept crop or ``None`` for a no-cat skip.
+        Per-photo notes go through ``tqdm.write`` so they scroll above the
+        progress bar rather than fighting it; ``no_cat`` collects the skips for
+        the closing summary.
+        """
+        for path in photos:
+            image = load_image(path)
+            if detector is None:
+                tqdm.write(f"{path.name}: full frame (detect off)")
+                yield GalleryRow(path.name, None), image
+                continue
+            pairs = detect_and_crop(image, detector, args.margin)
+            if not pairs:
+                no_cat.append(path.name)
+                tqdm.write(f"{path.name}: NO CAT DETECTED -- skipped")
+                yield None
+                continue
+            # Highest-confidence detection is Indy; any extras are errors.
+            detection, crop = pairs[0]
+            extra = f" ({len(pairs)} detections, kept top)" if len(pairs) > 1 else ""
+            tqdm.write(f"{path.name}: confidence {detection.confidence:.2f}{extra}")
+            yield GalleryRow(path.name, detection), crop
+
+    print(f"Loading embedder ({args.model})...")
     embedder = Embedder(model=args.model)
-    embeddings = embed_in_batches(embedder, crops, args.batch_size)
+    rows, embeddings = embed_stream(
+        embedder, detect_crop_stream(), args.batch_size, total=len(photos), desc="indy"
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     np.save(out_dir / "embeddings.npy", embeddings)
