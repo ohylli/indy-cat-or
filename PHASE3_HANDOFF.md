@@ -111,28 +111,36 @@ tables, no drift table, the FP cap + note, the nested resolver + forward-slash
 src). End-to-end against the real cache reproduces the documented baseline
 (FPR NFC only = 0.167, 20 shown + "+104 more", 1 FN).
 
-### B. Tests (mirror `tests/test_evaluate.py` + the builder tests)
+### B. Tests (mirror `tests/test_evaluate.py` + the builder tests) — **DONE**
 
+- **Test-enabling refactor.** The corrupt-image skip path lived in a closure
+  inside `build_catbreeds_negatives.main()` (and `main()` takes no `argv`), so it
+  was not unit-testable. Lifted `detect_crop_stream(cats, detector, margin,
+  misses, corrupt)` to module level (body verbatim, loops over `cats`; `main()`
+  now calls it). Behavior identical — confirmed by the full suite.
 - **Builder** (`tests/test_build_catbreeds.py`): `list_cat_images` (folder→breed,
-  sorted, bare unique filename), `sample_per_breed` (cap respected, 0 =
-  unlimited, deterministic per seed, re-sorted), the corrupt-image skip path
-  (feed a broken file → counted, not embedded), `write_metadata`/`write_catalog`
-  shape. Don't hit the network: build a tiny fake `<root>/images/<breed>/*.jpg`
-  tree in `tmp_path`. `ensure_dataset` (kagglehub) needs no test (thin wrapper);
-  if you want, monkeypatch `kagglehub.dataset_download`.
-- **Eval** (`tests/test_evaluate_catbreeds.py`): reuse `test_evaluate.py`'s
-  fixture style (write tiny indy + catbreeds variant caches + sidecars + a
-  manifest + an artifact via the existing builders/helpers). Cover: happy-path
-  `run_evaluation` (positives recall + all-rows negatives + per-breed/NFC rates),
-  the **variant-mismatch** assertion (`assert_cache_matches_artifact` loud when
-  the catbreeds sidecar's variant ≠ artifact), the **same-experiment** guard
-  (manifest gallery ≠ artifact gallery → loud), empty-catbreeds-cache loud, empty
-  Indy-test loud. Also a focused `metrics` test: `build_sweep` with a custom
-  `lookalike_breeds` partitions correctly (and the default is unchanged).
+  sorted, bare unique filename, non-dir entries ignored), `sample_per_breed` (cap
+  respected, 0/negative = unlimited, deterministic per seed, re-sorted, seed
+  changes the pick), `write_catalog`/`write_metadata` shape (breed column, index
+  alignment), and the **corrupt-image skip** through `detect_crop_stream`
+  (detector=None; a broken `b"not an image"` `.jpg` → counted in `corrupt[0]`,
+  not yielded) plus a detector-miss case (stubbed `detect_and_crop` → `[]` →
+  `misses[0]`). All synthetic in `tmp_path`; no network. `ensure_dataset`
+  untested (thin kagglehub wrapper).
+- **Eval** (`tests/test_evaluate_catbreeds.py`): reuses `test_evaluate.py`'s
+  fixture style (tiny indy + **catbreeds** variant caches + sidecars + manifest +
+  artifact). Covers: happy-path `run_evaluation` (recall + all-rows negatives +
+  per-breed/NFC rates), HTML + scores-CSV outputs, the **variant-mismatch**
+  assertion (`"different footing"`), the **same-experiment** guard (`"different
+  experiments"`), empty-catbreeds-cache loud (`"is empty"`), empty-Indy-test
+  loud, plus `main()` end-to-end HTML + missing-manifest `SystemExit`. Also the
+  focused `metrics` test: `build_sweep` with a custom `lookalike_breeds`
+  partitions correctly, and the default still uses Oxford's `LOOKALIKE_BREEDS`.
 - **HTML** smoke test — **DONE** in Task A
   (`tests/test_evaluate_catbreeds_report_html.py`): NFC row, look-alike breeds, no
   drift table, the FP cap + note, the nested resolver.
-- Run: `uv run pytest`, `uv run ruff check`, `uv run ruff format`, `uv run mypy`.
+- Verified: `uv run pytest` (201 passed), `uv run ruff check`, `uv run ruff
+  format`, `uv run mypy` all clean.
 
 ### C. Docs
 

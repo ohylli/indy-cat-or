@@ -181,6 +181,45 @@ def write_metadata(rows: list[CatbreedsRow], csv_path: Path) -> None:
             writer.writerow([*cells, row.breed])
 
 
+def detect_crop_stream(
+    cats: list[CatImage],
+    detector: CatDetector | None,
+    margin: float,
+    misses: list[int],
+    corrupt: list[int],
+) -> Iterator[tuple[CatbreedsRow, Image.Image] | None]:
+    """Detect+crop one cat at a time so the embedder consumes batches.
+
+    Yields ``(row, crop)`` for a kept crop or ``None`` for a skip; ``misses[0]``
+    tallies no-cat skips and ``corrupt[0]`` tallies unreadable images for the
+    closing summary (single-element lists so the caller sees the running totals).
+    Unlike the clean Oxford set, this Petfinder scrape has truncated/broken JPEGs,
+    so a decode failure is a counted skip (never an embed of garbage pixels), the
+    same loud-but-recoverable discipline as a detector miss -- the file is
+    catalogued but absent from metadata.csv. With ``detector`` None the full frame
+    is embedded (the --no-detect toggle).
+    """
+    for cat in cats:
+        try:
+            image = load_image(cat.path)
+            pairs = (
+                None if detector is None else detect_and_crop(image, detector, margin)
+            )
+        except OSError:
+            corrupt[0] += 1
+            yield None
+            continue
+        if detector is None:
+            yield CatbreedsRow(cat.source_filename, cat.breed, None), image
+            continue
+        if not pairs:
+            misses[0] += 1
+            yield None
+            continue
+        detection, crop = pairs[0]
+        yield CatbreedsRow(cat.source_filename, cat.breed, detection), crop
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build the cat-breeds (Kaggle ma7555) eval negatives."
@@ -298,44 +337,12 @@ def main() -> None:
     misses = [0]
     corrupt = [0]
 
-    def detect_crop_stream() -> Iterator[tuple[CatbreedsRow, Image.Image] | None]:
-        """Detect+crop one cat at a time so the embedder consumes batches.
-
-        Yields ``(row, crop)`` for a kept crop or ``None`` for a skip; ``misses[0]``
-        tallies no-cat skips and ``corrupt[0]`` tallies unreadable images for the
-        closing summary. Unlike the clean Oxford set, this Petfinder scrape has
-        truncated/broken JPEGs, so a decode failure is a counted skip (never an
-        embed of garbage pixels), the same loud-but-recoverable discipline as a
-        detector miss -- the file is catalogued but absent from metadata.csv.
-        """
-        for cat in sampled:
-            try:
-                image = load_image(cat.path)
-                pairs = (
-                    None
-                    if detector is None
-                    else detect_and_crop(image, detector, args.margin)
-                )
-            except OSError:
-                corrupt[0] += 1
-                yield None
-                continue
-            if detector is None:
-                yield CatbreedsRow(cat.source_filename, cat.breed, None), image
-                continue
-            if not pairs:
-                misses[0] += 1
-                yield None
-                continue
-            detection, crop = pairs[0]
-            yield CatbreedsRow(cat.source_filename, cat.breed, detection), crop
-
     print(f"Loading embedder ({args.model})...")
     embedder = Embedder(model=args.model)
     start = time.perf_counter()
     rows, embeddings = embed_stream(
         embedder,
-        detect_crop_stream(),
+        detect_crop_stream(sampled, detector, args.margin, misses, corrupt),
         args.batch_size,
         total=len(sampled),
         desc="catbreeds",
