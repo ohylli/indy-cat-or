@@ -78,8 +78,12 @@ def catbreeds_variant_dir(variant: EmbeddingsVariant) -> Path:
 #: Source-image directories, keyed to the ``source_filename`` columns: Indy's
 #: ``metadata.csv`` names live directly in ``images/indy/`` and Oxford's under
 #: ``images/oxford-iiit-pet/images/``. The HTML report embeds these full images.
+#: Cat-breeds is nested per breed (``images/cat-breeds/images/<breed>/<file>``)
+#: and its ``source_filename`` is the bare name, so the cat-breeds HTML report
+#: resolves the ``<breed>/`` subpath itself rather than looking up flat here.
 INDY_IMAGE_DIR = REPO_ROOT / "images" / "indy"
 OXFORD_IMAGE_DIR = REPO_ROOT / "images" / "oxford-iiit-pet" / "images"
+CATBREEDS_IMAGE_DIR = REPO_ROOT / "images" / "cat-breeds" / "images"
 
 #: Default output location for the optional HTML calibration report (gitignored,
 #: like ``SPLITS_DIR``).

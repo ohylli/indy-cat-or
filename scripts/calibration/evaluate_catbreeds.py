@@ -34,8 +34,10 @@ from calibration.artifact import CalibrationArtifact, load_artifact
 from calibration.cache_variant import artifact_variant, assert_cache_matches_artifact
 from calibration.evaluate import assert_same_experiment
 from calibration.evaluate_catbreeds_report import build_report
+from calibration.evaluate_catbreeds_report_html import write_report_html
 from calibration.evaluate_report_text import write_scores_csv
 from calibration.manifest import (
+    REPORTS_DIR,
     SplitConfigError,
     SplitManifest,
     catbreeds_variant_dir,
@@ -46,6 +48,14 @@ from calibration.manifest import (
 from calibration.scoring import build_name_to_vector, score_role
 from indycat.decision import Aggregation, Gallery
 
+#: Sentinel for a bare ``--html`` (no path given) -> auto-name into REPORTS_DIR.
+_HTML_AUTO = "<auto>"
+
+
+def default_report_name(artifact_path: Path) -> str:
+    """Auto-name the cat-breeds HTML report off the artifact stem."""
+    return f"eval-catbreeds-{artifact_path.stem}.html"
+
 
 def run_evaluation(
     artifact: CalibrationArtifact,
@@ -53,6 +63,7 @@ def run_evaluation(
     manifest: SplitManifest,
     artifact_label: str,
     dataset_label: str,
+    html_out: Path | None,
     scores_out: Path | None = None,
 ) -> None:
     """Score the Indy test positives + all cat-breeds negatives against the gallery.
@@ -103,6 +114,17 @@ def run_evaluation(
     if scores_out is not None:
         write_scores_csv(scores_out, positives, negatives, artifact.threshold)
         print(f"\nPer-image scores written to {scores_out}")
+    if html_out is not None:
+        write_report_html(
+            html_out,
+            artifact_label,
+            dataset_label,
+            artifact,
+            positives,
+            negatives,
+            breeds,
+        )
+        print(f"\nHTML report written to {html_out}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,6 +143,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="split manifest for the Indy positives (defaults to the artifact's "
         "recorded chosen_by.manifest; override to use a different test set drawn "
         "from the SAME gallery).",
+    )
+    parser.add_argument(
+        "--html",
+        nargs="?",
+        const=_HTML_AUTO,
+        default=None,
+        help="also write a semantic-HTML report; bare flag auto-names into "
+        "data/reports/, or pass an explicit path.",
     )
     parser.add_argument(
         "--scores-out",
@@ -151,6 +181,13 @@ def main(argv: list[str] | None = None) -> None:
             )
         manifest = load_manifest(manifest_path)
 
+        if args.html is None:
+            html_out = None
+        elif args.html == _HTML_AUTO:
+            html_out = REPORTS_DIR / default_report_name(artifact_path)
+        else:
+            html_out = Path(args.html)
+
         scores_out = Path(args.scores_out) if args.scores_out is not None else None
 
         run_evaluation(
@@ -159,6 +196,7 @@ def main(argv: list[str] | None = None) -> None:
             manifest,
             str(artifact_path),
             "the cat-breeds dataset",
+            html_out,
             scores_out,
         )
     except SplitConfigError as err:

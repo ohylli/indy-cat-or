@@ -13,7 +13,7 @@ from __future__ import annotations
 import html
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -52,9 +52,17 @@ def rel_src(filename: str, image_dir: Path, html_dir: Path) -> str:
     return rel.replace(os.sep, "/")
 
 
-def figure(filename: str, image_dir: Path, html_dir: Path) -> str:
-    """One ``<figure>``: the image, with its filename as both ``alt`` and caption."""
-    src = html.escape(rel_src(filename, image_dir, html_dir))
+def figure(
+    filename: str, image_dir: Path, html_dir: Path, *, rel_path: str | None = None
+) -> str:
+    """One ``<figure>``: the image, with its filename as both ``alt`` and caption.
+
+    The image is located at ``image_dir / (rel_path or filename)``; ``rel_path``
+    lets a caller whose ``source_filename`` is a bare name point at a nested file
+    (e.g. cat-breeds' ``<breed>/<file>``) while keeping the bare ``filename`` as
+    the screen-reader alt text and caption.
+    """
+    src = html.escape(rel_src(rel_path or filename, image_dir, html_dir))
     name = html.escape(filename)
     return (
         f'<figure><img src="{src}" alt="{name}">'
@@ -87,6 +95,7 @@ def figure_list(
     html_dir: Path,
     *,
     show_breed: bool,
+    candidate_resolver: Callable[[str], str] | None = None,
 ) -> str:
     """An ordered list of scored rows: a text line plus candidate + best-match figures.
 
@@ -95,6 +104,12 @@ def figure_list(
     one place. The candidate image comes from ``candidate_dir``; its ``best_match``
     from ``best_match_dir`` (always the Indy gallery dir). ``show_breed`` appends
     the breed to the text line (negatives have one, positives do not).
+
+    ``candidate_resolver`` maps a candidate's ``name`` to a path relative to
+    ``candidate_dir`` -- for a source whose ``source_filename`` is a bare name but
+    whose image is nested (cat-breeds' ``<breed>/<file>``). The caption/alt stays
+    the bare ``name``. ``None`` (the default) locates the candidate flat by name,
+    so existing callers are unchanged.
     """
     items = []
     for s in rows:
@@ -102,7 +117,8 @@ def figure_list(
         if show_breed:
             text += f" ({html.escape(str(s.breed))})"
         text += f" &rarr; best match {html.escape(s.best_match)}"
-        figures = figure(s.name, candidate_dir, html_dir) + figure(
+        rel_path = candidate_resolver(s.name) if candidate_resolver else None
+        figures = figure(s.name, candidate_dir, html_dir, rel_path=rel_path) + figure(
             s.best_match, best_match_dir, html_dir
         )
         items.append(f"<li><p>{text}</p>{figures}</li>")

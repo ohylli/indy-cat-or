@@ -80,36 +80,36 @@ semi-longhair NFC body type Indy is, not by long fur in general. This is the
 
 ## Phase 3 tasks
 
-### A. HTML report for the cat-breeds eval (the user specifically noticed `--help` has no `--html`)
+### A. HTML report for the cat-breeds eval — **DONE** (committed as its own follow-up)
 
-`evaluate_catbreeds.py` currently emits text + optional `--scores-out` only. Add
-`--html` to match `evaluate.py` (bare flag auto-names into `REPORTS_DIR`, or an
-explicit path — copy the `_HTML_AUTO` sentinel pattern + `default_report_name`
-from `evaluate.py`).
+`evaluate_catbreeds.py` now has `--html` matching `evaluate.py` (bare flag
+auto-names into `REPORTS_DIR` via `default_report_name`, or an explicit path; same
+`_HTML_AUTO` sentinel pattern). `html_out` threads through `run_evaluation`.
 
-Write `scripts/calibration/evaluate_catbreeds_report_html.py` mirroring
-`evaluate_report_html.py`, but:
-- Use `CATBREEDS_LOOKALIKE_BREEDS` in the rates table + add an NFC-only row (pass
-  `lookalike_breeds=` into `build_sweep`; read NFC FPR from `build_breed_sweep`,
-  same as the text report).
-- **Omit the drift table** (consistent with the text report).
-- Reuse `report_common` primitives (`HTML_STYLE`, `scoped_table`, `fmt_html`,
-  `figure_list`) so the accessible markup stays in one place.
+New `scripts/calibration/evaluate_catbreeds_report_html.py` mirrors
+`evaluate_report_html.py`:
+- Uses `CATBREEDS_LOOKALIKE_BREEDS` in the rates table + an **FPR (NFC only)** row
+  (passes `lookalike_breeds=` into `build_sweep`; reads NFC FPR from
+  `build_breed_sweep`, same as the text report).
+- **No drift table** (consistent with the text report).
+- Reuses `report_common` primitives (`HTML_STYLE`, `scoped_table`, `fmt_html`,
+  `figure_list`).
 
-**Gotcha — error-list crop images.** `figure_list` resolves a negative's image by
-`source_filename` inside one flat `*_image_dir`. **Cat-breeds images are nested
-per breed** (`images/cat-breeds/images/<breed>/<filename>.jpg`), so a flat lookup
-won't find them. Also there are **124 false positives** — embedding 124 images is
-heavy and noisy for a screen reader. Pick one (recommend in this order):
-1. **Text-only error lists in the HTML** (skip `figure_list`; render the same
-   scored rows as a `<ol>` like the text report). Simplest, screen-reader-first,
-   sidesteps the nested-path problem entirely. **Recommended.**
-2. Extend `figure_list` to accept a `name -> Path` resolver (a `{source_filename:
-   breed}` map builds `images/<breed>/<file>`), and cap the FP list (e.g. top
-   `RISK_ROWS`) with a logged "+N more" note (no silent truncation).
+**Image decision (chosen with the user): option 2.** `figure_list` (in
+`report_common.py`) gained an optional `candidate_resolver: Callable[[str], str]`
+(and `figure` an optional `rel_path`) — backward-compatible, every existing caller
+unchanged. The cat-breeds report passes a resolver that maps the bare
+`source_filename` to `<breed>/<file>` under the new `CATBREEDS_IMAGE_DIR`
+(`images/cat-breeds/images`, added to `manifest.py`), so the nested per-breed
+images resolve. The FP figure list is capped at a module constant
+`MAX_FP_FIGURES = 20` (easily editable) with a "+N more not shown; see the text
+report or the --scores-out CSV" note (no silent truncation — the full list stays
+in the text report and CSV). False negatives stay uncapped (tiny).
 
-Confirm the choice with the user — option 1 keeps scope small and matches the
-project's text-first ethos.
+Smoke test added: `tests/test_evaluate_catbreeds_report_html.py` (NFC row, scoped
+tables, no drift table, the FP cap + note, the nested resolver + forward-slash
+src). End-to-end against the real cache reproduces the documented baseline
+(FPR NFC only = 0.167, 20 shown + "+104 more", 1 FN).
 
 ### B. Tests (mirror `tests/test_evaluate.py` + the builder tests)
 
@@ -129,8 +129,9 @@ project's text-first ethos.
   (manifest gallery ≠ artifact gallery → loud), empty-catbreeds-cache loud, empty
   Indy-test loud. Also a focused `metrics` test: `build_sweep` with a custom
   `lookalike_breeds` partitions correctly (and the default is unchanged).
-- **HTML** test if you add the module: a smoke render asserting the NFC row and
-  the look-alike breeds appear and no drift table.
+- **HTML** smoke test — **DONE** in Task A
+  (`tests/test_evaluate_catbreeds_report_html.py`): NFC row, look-alike breeds, no
+  drift table, the FP cap + note, the nested resolver.
 - Run: `uv run pytest`, `uv run ruff check`, `uv run ruff format`, `uv run mypy`.
 
 ### C. Docs
