@@ -22,7 +22,7 @@ from __future__ import annotations
 from calibration.artifact import CalibrationArtifact
 from calibration.metrics import (
     ScoredImage,
-    build_breed_sweep,
+    build_breed_table,
     build_sweep,
     confusion_at,
     select_error_rows,
@@ -97,16 +97,16 @@ def _per_breed_section(
     negatives: list[ScoredImage], threshold: float
 ) -> tuple[list[str], float]:
     """The per-breed FPR table; also returns the NFC FPR for the rates section."""
-    breeds, fpr_by_breed = build_breed_sweep(negatives, [threshold])
-    width = max((len(b) for b in breeds), default=5)
+    rows = build_breed_table(negatives, threshold)
+    width = max((len(r.breed) for r in rows), default=5)
     lines = [
         "",
-        "Per-breed FPR at the frozen threshold (breeds sorted worst-first):",
-        f"  {'breed':<{width}}  {'FPR':>5}",
+        "Per-breed FPR at the frozen threshold (breeds sorted by FPR, highest first):",
+        f"  {'breed':<{width}}  {'FPR':>5}  {'cats':>5}",
     ]
-    for breed in breeds:
-        lines.append(f"  {breed:<{width}}  {_fmt(fpr_by_breed[breed][0]):>5}")
-    nfc_fpr = fpr_by_breed[NFC_BREED][0] if NFC_BREED in fpr_by_breed else float("nan")
+    for r in rows:
+        lines.append(f"  {r.breed:<{width}}  {_fmt(r.fpr):>5}  {r.count:>5}")
+    nfc_fpr = next((r.fpr for r in rows if r.breed == NFC_BREED), float("nan"))
     return lines, nfc_fpr
 
 

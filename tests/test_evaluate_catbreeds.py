@@ -252,6 +252,7 @@ def test_run_evaluation_prints_grade(
     assert "Recall (Indy):" in out
     assert "FPR (NFC only):" in out  # the NFC breakout
     assert "Per-breed FPR at the frozen threshold" in out
+    assert "breeds sorted by FPR, highest first" in out  # the FPR-descending order
     # The whole cat-breeds cache is the negative pool.
     assert f"Negatives: {len(CATBREEDS)} cat-breeds cats" in out
 

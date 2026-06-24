@@ -160,6 +160,34 @@ def build_breed_sweep(
 
 
 @dataclass(frozen=True)
+class BreedFpr:
+    """One row of the single-threshold per-breed FPR table."""
+
+    breed: str
+    fpr: float
+    count: int  # number of negative cats of this breed
+
+
+def build_breed_table(negatives: list[ScoredImage], threshold: float) -> list[BreedFpr]:
+    """Per-breed FPR at one cutoff, sorted by FPR (highest first), then cat count.
+
+    Ties on FPR are broken by descending cat count, then breed name for a stable
+    order. ``count`` is the number of negatives of that breed the FPR was computed
+    over. This is the evaluation reports' fixed-threshold view; the multi-threshold
+    calibration grid keeps using :func:`build_breed_sweep`.
+    """
+    by_breed: dict[str, list[float]] = {}
+    for s in negatives:
+        by_breed.setdefault(s.breed or "(unknown)", []).append(s.score)
+    rows = [
+        BreedFpr(breed, _rate(scores, threshold), len(scores))
+        for breed, scores in by_breed.items()
+    ]
+    rows.sort(key=lambda r: (-r.fpr, -r.count, r.breed))
+    return rows
+
+
+@dataclass(frozen=True)
 class Confusion:
     """The confusion matrix at one cutoff (the ``>=`` convention, like the sweep).
 

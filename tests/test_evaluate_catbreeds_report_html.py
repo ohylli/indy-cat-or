@@ -124,6 +124,13 @@ def test_has_scoped_tables(tmp_path: Path) -> None:
     assert '<th scope="row">' in document
 
 
+def test_per_breed_table_has_cats_column(tmp_path: Path) -> None:
+    document = _render(tmp_path)
+    assert '<th scope="col">cats</th>' in document  # the new per-breed cat-count column
+    # NFC has 5 negatives in the fixture; its count cell appears in the table.
+    assert "<td>5</td>" in document
+
+
 def test_no_drift_table(tmp_path: Path) -> None:
     document = _render(tmp_path)
     assert "Generalization" not in document

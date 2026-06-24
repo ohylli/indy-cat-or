@@ -30,8 +30,9 @@ from calibration.artifact import CalibrationArtifact
 from calibration.evaluate_catbreeds_report import CATBREEDS_LOOKALIKE_BREEDS, NFC_BREED
 from calibration.manifest import CATBREEDS_IMAGE_DIR, INDY_IMAGE_DIR
 from calibration.metrics import (
+    BreedFpr,
     ScoredImage,
-    build_breed_sweep,
+    build_breed_table,
     build_sweep,
     confusion_at,
     select_error_rows,
@@ -83,11 +84,9 @@ def _html_rates(
     return note + table
 
 
-def _html_per_breed(breeds: list[str], fpr_by_breed: dict[str, list[float]]) -> str:
-    body = [
-        (html.escape(breed), [fmt_html(fpr_by_breed[breed][0])]) for breed in breeds
-    ]
-    return scoped_table(["FPR"], body, corner="breed")
+def _html_per_breed(rows: list[BreedFpr]) -> str:
+    body = [(html.escape(r.breed), [fmt_html(r.fpr), str(r.count)]) for r in rows]
+    return scoped_table(["FPR", "cats"], body, corner="breed")
 
 
 def _html_error_lists(
@@ -179,8 +178,8 @@ def render_catbreeds_report_html(
     n_breeds = len({s.breed for s in negatives})
     esc_artifact = html.escape(artifact_label)
     esc_dataset = html.escape(dataset_label)
-    sweep_breeds, fpr_by_breed = build_breed_sweep(negatives, [artifact.threshold])
-    nfc_fpr = fpr_by_breed[NFC_BREED][0] if NFC_BREED in fpr_by_breed else float("nan")
+    breed_rows = build_breed_table(negatives, artifact.threshold)
+    nfc_fpr = next((r.fpr for r in breed_rows if r.breed == NFC_BREED), float("nan"))
     parts = [
         "<!DOCTYPE html>",
         '<html lang="en">',
@@ -208,8 +207,8 @@ def render_catbreeds_report_html(
         "<h2>Rates at the frozen threshold</h2>",
         _html_rates(positives, negatives, artifact.threshold, nfc_fpr),
         "<h2>Per-breed FPR at the frozen threshold</h2>",
-        "<p>Breeds sorted worst-first (highest max negative score).</p>",
-        _html_per_breed(sweep_breeds, fpr_by_breed),
+        "<p>Breeds sorted by FPR, highest first.</p>",
+        _html_per_breed(breed_rows),
         *_html_error_lists(
             positives,
             negatives,

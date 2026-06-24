@@ -361,6 +361,8 @@ def test_text_report_has_all_sections() -> None:
     assert "Confusion at the frozen threshold:" in report
     assert "Rates at the frozen threshold:" in report
     assert "Per-breed FPR at the frozen threshold" in report
+    assert "breeds sorted by FPR, highest first" in report  # the FPR-descending order
+    assert "cats" in report  # the per-breed cat-count column
     assert "Generalization (calibration vs test" in report
     assert "recall_indy" in report  # a drift-table row
 

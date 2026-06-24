@@ -20,7 +20,7 @@ from calibration.evaluate_report_text import LOOKALIKE_NOTE
 from calibration.manifest import INDY_IMAGE_DIR, OXFORD_IMAGE_DIR
 from calibration.metrics import (
     ScoredImage,
-    build_breed_sweep,
+    build_breed_table,
     build_sweep,
     confusion_at,
     select_error_rows,
@@ -59,11 +59,9 @@ def _html_rates(
 
 
 def _html_per_breed(negatives: list[ScoredImage], threshold: float) -> str:
-    breeds, fpr_by_breed = build_breed_sweep(negatives, [threshold])
-    body = [
-        (html.escape(breed), [fmt_html(fpr_by_breed[breed][0])]) for breed in breeds
-    ]
-    return scoped_table(["FPR"], body, corner="breed")
+    rows = build_breed_table(negatives, threshold)
+    body = [(html.escape(r.breed), [fmt_html(r.fpr), str(r.count)]) for r in rows]
+    return scoped_table(["FPR", "cats"], body, corner="breed")
 
 
 def _html_drift(
@@ -178,7 +176,7 @@ def render_report_html(
         "<h2>Rates at the frozen threshold</h2>",
         _html_rates(positives, negatives, artifact.threshold),
         "<h2>Per-breed FPR at the frozen threshold</h2>",
-        "<p>Breeds sorted worst-first (highest max negative score).</p>",
+        "<p>Breeds sorted by FPR, highest first.</p>",
         _html_per_breed(negatives, artifact.threshold),
         "<h2>Generalization (calibration vs test)</h2>",
         "<p>Each metric at the same frozen threshold, so the generalization gap "

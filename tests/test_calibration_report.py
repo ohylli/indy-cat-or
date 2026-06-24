@@ -177,6 +177,32 @@ def test_build_breed_sweep_is_sorted_worst_first() -> None:
     assert fpr_by_breed["Abyssinian"] == [pytest.approx(0.0)]
 
 
+def test_build_breed_table_sorts_by_fpr_then_count() -> None:
+    negatives = [
+        # Abyssinian: 1 of 1 over threshold -> FPR 1.0, count 1.
+        cr.ScoredImage("Abyssinian_1.jpg", 0.9, "g0", "Abyssinian"),
+        # Persian: 1 of 2 over threshold -> FPR 0.5, count 2.
+        cr.ScoredImage("Persian_1.jpg", 0.9, "g0", "Persian"),
+        cr.ScoredImage("Persian_2.jpg", 0.1, "g0", "Persian"),
+        # Birman: 0 of 3 over threshold -> FPR 0.0, count 3 (largest of the zeros).
+        cr.ScoredImage("Birman_1.jpg", 0.1, "g0", "Birman"),
+        cr.ScoredImage("Birman_2.jpg", 0.1, "g0", "Birman"),
+        cr.ScoredImage("Birman_3.jpg", 0.1, "g0", "Birman"),
+        # Ragdoll: 0 of 1 over threshold -> FPR 0.0, count 1 (tie-breaks below Birman).
+        cr.ScoredImage("Ragdoll_1.jpg", 0.1, "g0", "Ragdoll"),
+    ]
+    rows = cr.build_breed_table(negatives, 0.5)
+    assert [(r.breed, r.count) for r in rows] == [
+        ("Abyssinian", 1),  # FPR 1.0
+        ("Persian", 2),  # FPR 0.5
+        ("Birman", 3),  # FPR 0.0, count 3 -- ahead of Ragdoll on the count tie-break
+        ("Ragdoll", 1),  # FPR 0.0, count 1
+    ]
+    assert rows[0].fpr == pytest.approx(1.0)
+    assert rows[1].fpr == pytest.approx(0.5)
+    assert rows[2].fpr == pytest.approx(0.0)
+
+
 def test_build_report_includes_sweep_sections() -> None:
     positives = [cr.ScoredImage("p0", 0.8, "g0", None)]
     negatives = [cr.ScoredImage("Persian_1.jpg", 0.5, "g0", "Persian")]
