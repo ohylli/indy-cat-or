@@ -22,9 +22,8 @@ __pycache__/
 # claude
 .claude/
 
-# Indy photos: kept local only, not committed. The CSV metadata is tracked.
-/images/indy/*
-!/images/indy/mapping.csv
+# Indy photos: committed and published (CC BY-NC 4.0, see images/indy/LICENSE),
+# with the owner's permission.
 
 # Oxford-IIIT Pet: downloaded negatives, local only (like the Indy photos).
 /images/oxford-iiit-pet/
