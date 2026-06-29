@@ -1,7 +1,9 @@
 # indy-cat-or
 
-A binary classifier that answers one question: **is the specific cat "Indy" in
-this image — or not?**
+A personal machine learning hobby project for answering a very important question: does a given
+image contain my friend's cat Indy. Yep, seriously that is it. I created this
+project after becoming curious about machine learning and seeing an image
+classification demo.
 
 ## Licensing
 
